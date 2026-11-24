@@ -516,8 +516,17 @@ class PapercraftWebHandler(BaseHTTPRequestHandler):
                 else:
                     page_w, page_h = 215.9, 279.4
 
-                # Unfold parts with user-specified flap size
-                parts = unfold_model_to_parts(model, target_scale=1.0, flap_size_mm=flap_size_mm)
+                # Unfold parts with user-specified flap size and auto-scale
+                user_scale = data.get("scale", None)
+                if user_scale is not None:
+                    try:
+                        user_scale = float(user_scale)
+                        if user_scale <= 0:
+                            user_scale = None
+                    except (ValueError, TypeError):
+                        user_scale = None
+
+                parts = unfold_model_to_parts(model, target_scale=user_scale, flap_size_mm=flap_size_mm)
                 pages = pack_parts_onto_pages(parts, page_w, page_h, margin=margin_mm, part_gap=5.0)
 
                 out_temp = os.path.join(tempfile.gettempdir(), "pepakura_web_exports")

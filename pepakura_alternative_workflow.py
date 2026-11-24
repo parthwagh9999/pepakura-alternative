@@ -7,11 +7,12 @@ A fully autonomous, precision papercraft template generator for manual crafting
 and cutting plotters (Cricut, Silhouette, Brother, etc.).
 
 Accepts ANY 3D model (.obj) and produces production-grade vector templates:
+  - Intelligent Unit & Scale Detection: Automatically detects meters, cm, or mm
   - Page Format: US Letter (8.5 x 11.0 in / 215.9 x 279.4 mm) or A4
   - Margins: Strict >= 15.0 mm clearance from all page edges
   - Part Spacing: Strict >= 5.0 mm clearance between adjacent parts
-  - Outward Glue Tabs: 45° base angle with faint grey fill (#E6E6E6) and
-    fine diagonal cross-hatch pattern (#B8B8B8)
+  - Outward Glue Tabs: 45° base angle with faint grey fill (#E6E6E6), configurable
+    depth in mm, and fine diagonal cross-hatch pattern (#B8B8B8)
   - Edge Matching IDs: Protected badges on tabs, exterior placement on cut edges
   - Fold Classifications:
       * Mountain Folds: Dashed Red (#D32F2F)
@@ -29,10 +30,8 @@ Accepts ANY 3D model (.obj) and produces production-grade vector templates:
 import os
 import sys
 import math
-import base64
 import argparse
-from io import BytesIO
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
@@ -42,13 +41,13 @@ MM_TO_PT = 72.0 / 25.4  # 1 mm in PostScript points = 2.834645669 pt
 
 
 # =============================================================================
-# 1. 3D OBJ PARSER & GEOMETRIC PROCESSOR
+# 1. 3D OBJ PARSER & AUTO-SCALE DETECTION
 # =============================================================================
 
 class Model3D:
     """Universal 3D Mesh container supporting any polygon model."""
     def __init__(self):
-        self.vertices = []       # [(x, y, z), ...]
+        self.vertices = []       # [(x, y, z), ...] in model units
         self.uvs = []            # [(u, v), ...]
         self.normals = []        # [(nx, ny, nz), ...]
         self.faces = []          # [ {'v': [v0, v1, ..], 'vt': [t0, t1, ..]}, ...]
@@ -113,20 +112,16 @@ class Model3D:
 
     @classmethod
     def create_default_model(cls):
-        """Generates a default low-poly geometric 3D model for demonstration."""
+        """Generates a default low-poly geometric 3D model for demonstration (in mm)."""
         model = cls()
-        # 3D truncated hexagonal prism with varied planar facets
         angles = [i * (2.0 * math.pi / 6.0) for i in range(6)]
         r_bottom, r_top = 35.0, 25.0
         h = 50.0
 
-        # Base vertices
         for a in angles:
             model.vertices.append((r_bottom * math.cos(a), r_bottom * math.sin(a), 0.0))
-        # Top vertices
         for a in angles:
             model.vertices.append((r_top * math.cos(a), r_top * math.sin(a), h))
-        # Peak vertex
         model.vertices.append((0.0, 0.0, h + 22.0))
 
         # Bottom face
@@ -143,8 +138,39 @@ class Model3D:
         return model
 
 
+def compute_auto_scale(vertices, user_scale=None):
+    """
+    Intelligent unit detection:
+      - If max dimension < 2.0 (e.g. 0.08 to 0.5), model is in METERS -> scale by 1000.0 (mm)
+      - If max dimension < 25.0 (e.g. 5 to 15), model is in CENTIMETERS -> scale by 10.0 (mm)
+      - If max dimension > 300.0 (e.g. huge architectural units) -> scale to fit printable sheet
+      - Otherwise, model is already in millimeters -> scale by 1.0
+    """
+    if user_scale is not None and user_scale > 0:
+        return user_scale
+
+    xs = [v[0] for v in vertices]
+    ys = [v[1] for v in vertices]
+    zs = [v[2] for v in vertices]
+    max_dim = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+
+    if max_dim < 2.0:
+        print(f"Auto-detected model unit: METERS (max dimension: {max_dim:.4f} m). Scaling by 1000.0 to millimeters.")
+        return 1000.0
+    elif max_dim < 25.0:
+        print(f"Auto-detected model unit: CENTIMETERS (max dimension: {max_dim:.2f} cm). Scaling by 10.0 to millimeters.")
+        return 10.0
+    elif max_dim > 300.0:
+        target_s = 150.0 / max_dim
+        print(f"Model dimensions ({max_dim:.1f}) exceed printable sheet size. Auto-scaling by {target_s:.4f}.")
+        return target_s
+    else:
+        print(f"Auto-detected model unit: MILLIMETERS (max dimension: {max_dim:.1f} mm). Scale = 1.0.")
+        return 1.0
+
+
 # =============================================================================
-# 2. 2D UNROLLING, FLAP GENERATOR & ALTERNATING SEAM ASSIGNMENT
+# 2. 2D GEOMETRY & FLAP GENERATOR
 # =============================================================================
 
 class PaperPart:
@@ -152,13 +178,12 @@ class PaperPart:
     def __init__(self, part_id, name="Part"):
         self.part_id = part_id
         self.name = name
-        self.poly2d = []             # List of 2D points [(x, y), ...]
-        self.internal_folds = []     # List of ((p1, p2), fold_type) ('mountain' | 'valley')
-        self.edges = []              # Perimeter edges [(p1, p2), ...]
-        self.tabs = []               # Outward tabs [ {'edge': (p1, p2), 'poly': [...], 'id': int}, ... ]
-        self.edge_labels = []        # Exterior labels on cut edges [ {'pos': (x,y), 'id': int}, ... ]
-        self.texture_crop_box = None # (left, top, right, bottom) normalized or pixel
-        self.color_hex = "#FFFFFF"
+        self.poly2d = []             # Perimeter points [(x, y), ...] in mm
+        self.edge_3d_keys = []       # Associated 3D edge keys for perimeter edges
+        self.edge_3d_mids = []       # Associated 3D edge midpoints
+        self.internal_folds = []     # [ ((p1, p2), 'mountain' | 'valley'), ... ]
+        self.tabs = []               # [ {'edge': (p1, p2), 'poly': [...], 'id': int}, ... ]
+        self.edge_labels = []        # [ {'pos': (x,y), 'id': int}, ... ]
 
     def compute_bounds(self):
         pts = list(self.poly2d)
@@ -166,6 +191,8 @@ class PaperPart:
             pts.extend(t['poly'])
         for l in self.edge_labels:
             pts.append(l['pos'])
+        if not pts:
+            return 0, 0, 0, 0
         min_x = min(p[0] for p in pts)
         max_x = max(p[0] for p in pts)
         min_y = min(p[1] for p in pts)
@@ -178,10 +205,6 @@ class PaperPart:
             (((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)), ftype)
             for (p1, p2), ftype in self.internal_folds
         ]
-        self.edges = [
-            ((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy))
-            for p1, p2 in self.edges
-        ]
         for t in self.tabs:
             t['edge'] = ((t['edge'][0][0] + dx, t['edge'][0][1] + dy),
                          (t['edge'][1][0] + dx, t['edge'][1][1] + dy))
@@ -191,7 +214,7 @@ class PaperPart:
 
 
 def compute_outward_normal(poly, p1, p2):
-    """Computes a unit 2D vector pointing strictly outward away from the polygon."""
+    """Computes unit 2D normal vector pointing strictly outward from the polygon."""
     cx = sum(p[0] for p in poly) / len(poly)
     cy = sum(p[1] for p in poly) / len(poly)
     mx = (p1[0] + p2[0]) * 0.5
@@ -213,7 +236,7 @@ def compute_outward_normal(poly, p1, p2):
 
 
 def generate_outward_flap(poly, p1, p2, depth=5.5, taper_angle=45.0):
-    """Generates a standard 45° outward trapezoidal glue tab with protective geometry."""
+    """Generates an outward trapezoidal glue tab with 45° base angle and exact depth in mm."""
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
     L = math.hypot(dx, dy)
@@ -226,7 +249,7 @@ def generate_outward_flap(poly, p1, p2, depth=5.5, taper_angle=45.0):
 
     rad = math.radians(taper_angle)
     offset = depth / math.tan(rad)
-    max_offset = L * 0.42
+    max_offset = L * 0.38
     if offset > max_offset:
         offset = max_offset
 
@@ -236,156 +259,216 @@ def generate_outward_flap(poly, p1, p2, depth=5.5, taper_angle=45.0):
 
 
 # =============================================================================
-# 3. UNIVERSAL MESH UNWRAPPER & PACKING ENGINE
+# 3. 3D SEAM MATCHING & TOPOLOGY SOLVER
 # =============================================================================
 
-def unfold_model_to_parts(model, target_scale=1.0, flap_size_mm=5.5):
+def quantize_pt(pt, precision=2):
+    """Quantizes 3D spatial coordinate for robust mesh boundary matching."""
+    return (round(pt[0], precision), round(pt[1], precision), round(pt[2], precision))
+
+
+def make_3d_edge_key(p1, p2):
+    """Creates an unordered 3D edge key from two endpoint positions."""
+    q1 = quantize_pt(p1)
+    q2 = quantize_pt(p2)
+    return tuple(sorted([q1, q2]))
+
+
+def project_face_to_2d(verts_3d):
+    """Projects a 3D planar polygon into 2D preserving exact 3D edge lengths in mm."""
+    v0 = verts_3d[0]
+    # Edge 0 as u-axis
+    e0 = (verts_3d[1][0] - v0[0], verts_3d[1][1] - v0[1], verts_3d[1][2] - v0[2])
+    e0_len = math.hypot(e0[0], math.hypot(e0[1], e0[2]))
+    if e0_len < 1e-6:
+        u_axis = (1.0, 0.0, 0.0)
+    else:
+        u_axis = (e0[0] / e0_len, e0[1] / e0_len, e0[2] / e0_len)
+
+    # Calculate face normal
+    ax, ay, az = e0
+    bx = verts_3d[2][0] - v0[0]
+    by = verts_3d[2][1] - v0[1]
+    bz = verts_3d[2][2] - v0[2]
+    nx = ay * bz - az * by
+    ny = az * bx - ax * bz
+    nz = ax * by - ay * bx
+    nl = math.hypot(nx, math.hypot(ny, nz))
+    if nl > 1e-6:
+        norm = (nx / nl, ny / nl, nz / nl)
+    else:
+        norm = (0.0, 0.0, 1.0)
+
+    # v-axis = normal x u-axis
+    v_axis = (
+        norm[1] * u_axis[2] - norm[2] * u_axis[1],
+        norm[2] * u_axis[0] - norm[0] * u_axis[2],
+        norm[0] * u_axis[1] - norm[1] * u_axis[0]
+    )
+
+    poly2d = []
+    for v in verts_3d:
+        rel = (v[0] - v0[0], v[1] - v0[1], v[2] - v0[2])
+        pu = rel[0] * u_axis[0] + rel[1] * u_axis[1] + rel[2] * u_axis[2]
+        pv = rel[0] * v_axis[0] + rel[1] * v_axis[1] + rel[2] * v_axis[2]
+        poly2d.append((pu, pv))
+
+    return poly2d, norm
+
+
+def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5):
     """
-    Transforms any 3D model into an optimal collection of 2D unfolded papercraft parts.
-    If UVs are present, constructs 2D islands using texture coordinates.
-    If UVs are not present, performs 3D face unrolling across shared edges.
+    Universal 3D Unroller:
+      1. Automatically detects model scale (meters, cm, mm) if not specified.
+      2. Projects each face to 2D preserving exact 3D lengths in millimeters.
+      3. Matches shared seams across 3D coordinates (Pass 1: exact keys, Pass 2: proximity/overhangs).
+      4. Applies strict alternating outward glue tabs with configured flap size (mm) and 45° angle.
+      5. Places matching edge numbers 2.5mm outside cut outlines into scrap paper margins.
     """
+    if target_scale is None:
+        target_scale = compute_auto_scale(model.vertices)
+
+    # 1. Scale 3D vertices to real-world millimeters
+    verts_mm = [(v[0] * target_scale, v[1] * target_scale, v[2] * target_scale) for v in model.vertices]
+
+    # 2. Project individual faces to 2D
+    face_data = []
+    for f_idx, f in enumerate(model.faces):
+        f_verts_3d = [verts_mm[vi] for vi in f['v']]
+        poly2d, normal = project_face_to_2d(f_verts_3d)
+
+        # 3D edge keys and midpoints for this face
+        n_pts = len(f_verts_3d)
+        edge_keys_3d = [make_3d_edge_key(f_verts_3d[i], f_verts_3d[(i + 1) % n_pts]) for i in range(n_pts)]
+        edge_mids_3d = [
+            ((f_verts_3d[i][0] + f_verts_3d[(i + 1) % n_pts][0]) * 0.5,
+             (f_verts_3d[i][1] + f_verts_3d[(i + 1) % n_pts][1]) * 0.5,
+             (f_verts_3d[i][2] + f_verts_3d[(i + 1) % n_pts][2]) * 0.5)
+            for i in range(n_pts)
+        ]
+
+        face_data.append({
+            'face_idx': f_idx,
+            'verts_3d': f_verts_3d,
+            'poly2d': poly2d,
+            'edge_keys': edge_keys_3d,
+            'edge_mids': edge_mids_3d,
+            'normal': normal
+        })
+
+    # 3. Create independent PaperPart for each face
     parts = []
+    for fd in face_data:
+        p = PaperPart(part_id=len(parts) + 1, name=f"Part {len(parts) + 1}")
+        p.poly2d = list(fd['poly2d'])
+        p.edge_3d_keys = list(fd['edge_keys'])
+        p.edge_3d_mids = list(fd['edge_mids'])
+        parts.append(p)
 
-    if len(model.faces) == 0:
-        return parts
-
-    # Check if model has UV coordinates
-    has_uv = (len(model.uvs) > 0 and any(len(f['vt']) == len(f['v']) for f in model.faces))
-
-    if has_uv:
-        # Group faces into UV islands
-        pass
-
-    # Generic 3D unroller: group coplanar or smoothly connected faces into islands
-    face_normals = []
-    for f in model.faces:
-        verts = [model.vertices[vi] for vi in f['v']]
-        if len(verts) >= 3:
-            v0, v1, v2 = verts[0], verts[1], verts[2]
-            ax, ay, az = v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]
-            bx, by, bz = v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]
-            nx = ay * bz - az * by
-            ny = az * bx - ax * bz
-            nz = ax * by - ay * bx
-            nl = math.hypot(nx, math.hypot(ny, nz))
-            if nl > 1e-6:
-                face_normals.append((nx / nl, ny / nl, nz / nl))
-            else:
-                face_normals.append((0.0, 0.0, 1.0))
-        else:
-            face_normals.append((0.0, 0.0, 1.0))
-
-    for idx, f in enumerate(model.faces):
-        part = PaperPart(part_id=idx + 1, name=f"Part {idx + 1}")
-        verts = [model.vertices[vi] for vi in f['v']]
-        n = face_normals[idx]
-
-        # 3D to 2D local projection
-        v0 = verts[0]
-        e0 = (verts[1][0] - v0[0], verts[1][1] - v0[1], verts[1][2] - v0[2])
-        e0_len = math.hypot(e0[0], math.hypot(e0[1], e0[2]))
-        if e0_len < 1e-6:
-            u_axis = (1.0, 0.0, 0.0)
-        else:
-            u_axis = (e0[0] / e0_len, e0[1] / e0_len, e0[2] / e0_len)
-
-        v_axis = (
-            n[1] * u_axis[2] - n[2] * u_axis[1],
-            n[2] * u_axis[0] - n[0] * u_axis[2],
-            n[0] * u_axis[1] - n[1] * u_axis[0]
-        )
-
-        poly2d = []
-        for vi, v in enumerate(verts):
-            rel = (v[0] - v0[0], v[1] - v0[1], v[2] - v0[2])
-            pu = rel[0] * u_axis[0] + rel[1] * u_axis[1] + rel[2] * u_axis[2]
-            pv = rel[0] * v_axis[0] + rel[1] * v_axis[1] + rel[2] * v_axis[2]
-            poly2d.append((pu * target_scale, pv * target_scale))
-
-        part.poly2d = poly2d
-        for k in range(len(poly2d)):
-            p1 = poly2d[k]
-            p2 = poly2d[(k + 1) % len(poly2d)]
-            part.edges.append((p1, p2))
-
-        parts.append(part)
-
-    merged_parts = merge_connected_faces(parts, model, target_scale)
-    assign_alternating_tabs_and_ids(merged_parts, model, flap_size_mm=flap_size_mm)
-
-    return merged_parts
-
-
-def merge_connected_faces(parts, model, scale):
-    """
-    Merges adjacent faces that share an edge into unfolded compound islands
-    while avoiding overlapping nets, creating clean foldable papercraft sheets.
-    """
-    if len(parts) <= 6:
-        return parts
-
-    # For general meshes, group adjacent small triangles into quads or compound facets
-    # If already moderate count, return parts
-    return parts
-
-
-def assign_alternating_tabs_and_ids(parts, model, flap_size_mm=5.5):
-    """
-    Strict Alternating Tab Assignment Algorithm:
-    Identifies all seam pairs between adjacent 3D faces.
-    Exactly ONE side receives an outward glue tab with cross-hatch fill and ID badge.
-    The mating side remains a clean cut line, with its ID placed 2.5mm OUTSIDE on scrap margin.
-    Alternates tab placement around part perimeters to guarantee zero tab collisions.
-    
-    Args:
-        parts: List of PaperPart objects.
-        model: 3D model geometry.
-        flap_size_mm: Depth/size of outward glue flap in millimeters.
-    """
-    edge_map = {}
+    # 4. Global 3D Seam Matching across all parts
+    edge_catalog = []
     for p_idx, part in enumerate(parts):
         poly = part.poly2d
-        for e_idx in range(len(poly)):
+        n_edges = len(poly)
+        for e_idx in range(n_edges):
             p1 = poly[e_idx]
-            p2 = poly[(e_idx + 1) % len(poly)]
-            k = (round(min(p1[0], p2[0]), 2), round(min(p1[1], p2[1]), 2),
-                 round(max(p1[0], p2[0]), 2), round(max(p1[1], p2[1]), 2))
-            edge_map.setdefault(k, []).append((p_idx, e_idx))
+            p2 = poly[(e_idx + 1) % n_edges]
+            ek = part.edge_3d_keys[e_idx] if e_idx < len(part.edge_3d_keys) else None
+            emid = part.edge_3d_mids[e_idx] if e_idx < len(part.edge_3d_mids) else None
+            edge_catalog.append({
+                'part_idx': p_idx,
+                'edge_idx': e_idx,
+                'p1': p1,
+                'p2': p2,
+                'key_3d': ek,
+                'mid_3d': emid
+            })
 
-    seam_counter = 1
-    processed_edges = set()
+    matched_edges = set()
+    seam_pairs = []
 
-    for p_idx, part in enumerate(parts):
-        poly = part.poly2d
-        for e_idx in range(len(poly)):
-            edge_key = (p_idx, e_idx)
-            if edge_key in processed_edges:
+    # Pass 1: Exact 3D edge key matching
+    for i in range(len(edge_catalog)):
+        if i in matched_edges:
+            continue
+        e_a = edge_catalog[i]
+        for j in range(i + 1, len(edge_catalog)):
+            if j in matched_edges:
                 continue
+            e_b = edge_catalog[j]
+            if e_a['part_idx'] != e_b['part_idx'] and e_a['key_3d'] == e_b['key_3d']:
+                seam_pairs.append((i, j))
+                matched_edges.add(i)
+                matched_edges.add(j)
+                break
 
-            p1 = poly[e_idx]
-            p2 = poly[(e_idx + 1) % len(poly)]
-            has_tab = (e_idx % 2 == 0)
+    # Pass 2: Proximity matching for architectural overhangs / eaves (within 10.0 mm)
+    for i in range(len(edge_catalog)):
+        if i in matched_edges:
+            continue
+        e_a = edge_catalog[i]
+        best_j = None
+        min_dist = 10.0  # mm threshold
+        ma = e_a['mid_3d']
+        if ma is not None:
+            for j in range(len(edge_catalog)):
+                if j == i or j in matched_edges:
+                    continue
+                e_b = edge_catalog[j]
+                if e_a['part_idx'] == e_b['part_idx']:
+                    continue
+                mb = e_b['mid_3d']
+                if mb is None:
+                    continue
+                dist = math.hypot(ma[0] - mb[0], math.hypot(ma[1] - mb[1], ma[2] - mb[2]))
+                if dist < min_dist:
+                    min_dist = dist
+                    best_j = j
+            if best_j is not None:
+                seam_pairs.append((i, best_j))
+                matched_edges.add(i)
+                matched_edges.add(best_j)
 
-            if has_tab:
-                # Add outward trapezoidal tab with specified flap size in mm
-                flap_poly = generate_outward_flap(poly, p1, p2, depth=flap_size_mm, taper_angle=45.0)
-                part.tabs.append({
-                    'edge': (p1, p2),
-                    'poly': flap_poly,
-                    'id': seam_counter
-                })
-            else:
-                nx, ny = compute_outward_normal(poly, p1, p2)
-                mx = (p1[0] + p2[0]) * 0.5 + 2.5 * nx
-                my = (p1[1] + p2[1]) * 0.5 + 2.5 * ny
-                part.edge_labels.append({
-                    'pos': (mx, my),
-                    'id': seam_counter
-                })
+    print(f"Identified {len(seam_pairs)} shared 3D seams across {len(parts)} parts.")
 
-            processed_edges.add(edge_key)
-            seam_counter += 1
+    # 5. Apply Strict Alternating Flap Assignment
+    for seam_id, (idx_a, idx_b) in enumerate(seam_pairs, start=1):
+        e_a = edge_catalog[idx_a]
+        e_b = edge_catalog[idx_b]
+
+        part_a = parts[e_a['part_idx']]
+        part_b = parts[e_b['part_idx']]
+
+        # Alternating rule: decide which side gets the outward tab
+        if seam_id % 2 == 1:
+            tab_edge, clean_edge = e_a, e_b
+            tab_part, clean_part = part_a, part_b
+        else:
+            tab_edge, clean_edge = e_b, e_a
+            tab_part, clean_part = part_b, part_a
+
+        # Add outward glue flap with configured depth in mm
+        p1, p2 = tab_edge['p1'], tab_edge['p2']
+        edge_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        depth = min(flap_size_mm, edge_len * 0.45)
+        flap_poly = generate_outward_flap(tab_part.poly2d, p1, p2, depth=depth, taper_angle=45.0)
+        tab_part.tabs.append({
+            'edge': (p1, p2),
+            'poly': flap_poly,
+            'id': seam_id
+        })
+
+        # Add matching edge label 2.5mm OUTSIDE on scrap paper margin
+        cp1, cp2 = clean_edge['p1'], clean_edge['p2']
+        nx, ny = compute_outward_normal(clean_part.poly2d, cp1, cp2)
+        mx = (cp1[0] + cp2[0]) * 0.5 + 2.5 * nx
+        my = (cp1[1] + cp2[1]) * 0.5 + 2.5 * ny
+        clean_part.edge_labels.append({
+            'pos': (mx, my),
+            'id': seam_id
+        })
+
+    return parts
 
 
 # =============================================================================
@@ -405,7 +488,7 @@ def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
     pages = []
     current_page = []
 
-    # Sort parts by height descending for efficient shelf packing
+    # Calculate part bounding boxes
     part_boxes = []
     for p in parts:
         min_x, min_y, max_x, max_y = p.compute_bounds()
@@ -413,29 +496,26 @@ def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
         ph = max_y - min_y
         part_boxes.append((p, pw, ph, min_x, min_y))
 
-    # Shelf packing algorithm
+    # Sort parts by height descending
+    part_boxes.sort(key=lambda b: b[2], reverse=True)
+
     cur_x = margin
-    cur_y = margin + 12.0  # offset below top legend
+    cur_y = margin + 14.0  # offset below header legend
     shelf_h = 0.0
 
     for part, pw, ph, min_x, min_y in part_boxes:
-        # Check if part fits on current shelf
-        if cur_x + pw > margin + usable_w:
-            # Move to next shelf
+        if cur_x + pw > margin + usable_w and len(current_page) > 0:
             cur_x = margin
             cur_y += shelf_h + part_gap
             shelf_h = 0.0
 
-        # Check if shelf fits on current page
-        if cur_y + ph > margin + usable_h + 12.0 and len(current_page) > 0:
-            # Start new page
+        if cur_y + ph > margin + usable_h + 14.0 and len(current_page) > 0:
             pages.append(current_page)
             current_page = []
             cur_x = margin
-            cur_y = margin + 12.0
+            cur_y = margin + 14.0
             shelf_h = 0.0
 
-        # Place part at (cur_x, cur_y)
         dx = cur_x - min_x
         dy = cur_y - min_y
         part.translate(dx, dy)
@@ -485,7 +565,6 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
                f'3D Papercraft Template (Pepakura Alternative) — Page {page_num}/{total_pages}</text>')
 
     if variation in (1, 3):
-        # Full legend with fold lines
         svg.append('  <g id="LEGEND" transform="translate(24, 14.5)" font-family="Helvetica, Arial, sans-serif" font-size="2.2" fill="#333333">')
         svg.append('    <line x1="0" y1="0" x2="10" y2="0" stroke="#000000" stroke-width="0.4"/>')
         svg.append('    <text x="12" y="0.8">Solid: Cut Line</text>')
@@ -497,8 +576,8 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
         svg.append('    <text x="175" y="0.8">Flap (Cross-lined)</text>')
         svg.append('  </g>')
 
-    # Layer: Facet Backgrounds (Color or White)
-    fill_color = "#FFFFFF" if variation in (3, 4) else "#FDFDFD"
+    # Layer: Facet Backgrounds
+    fill_color = "#FFFFFF" if variation in (3, 4) else "#FBF9F5"
     svg.append('  <!-- PART FACETS -->')
     svg.append(f'  <g id="FACETS" fill="{fill_color}" stroke="none">')
     for part in page_parts:
@@ -506,7 +585,7 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
         svg.append(f'    <polygon points="{pts_str}"/>')
     svg.append('  </g>')
 
-    # Layer: Glue Flaps (Always cross-hatched with faint grey fill)
+    # Layer: Glue Flaps (cross-hatched with faint grey fill)
     svg.append('  <!-- GLUE TABS (OUTWARD 45° WITH CROSS-HATCH PATTERN) -->')
     svg.append('  <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="#000000" stroke-width="0.35">')
     for part in page_parts:
@@ -545,7 +624,7 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
     # Layer: Edge ID Labels (Variations 1 and 3 only)
     if variation in (1, 3):
         svg.append('  <!-- EDGE ID NUMBERS (PROTECTED BADGE ON TABS, EXTERIOR IN SCRAP MARGIN) -->')
-        svg.append('  <g id="EDGE_IDS" font-family="Helvetica, Arial, sans-serif" font-size="2.1" font-weight="bold" text-anchor="middle" dominant-baseline="central">')
+        svg.append('  <g id="EDGE_IDS" font-family="Helvetica, Arial, sans-serif" font-size="2.2" font-weight="bold" text-anchor="middle" dominant-baseline="central">')
         for part in page_parts:
             # Flap IDs
             for t in part.tabs:
@@ -630,7 +709,7 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
             p.close()
             c.drawPath(p, fill=1, stroke=0)
 
-            # 2. Glue Tabs (faint grey with cross-hatch strokes)
+            # 2. Glue Tabs (faint grey with cross-hatch pattern)
             for t in part.tabs:
                 c.saveState()
                 c.setFillColor(colors.HexColor('#E6E6E6'))
@@ -654,7 +733,6 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
                 min_y = (page_h - max(pt[1] for pt in t['poly'])) * MM_TO_PT - 10
                 max_y = (page_h - min(pt[1] for pt in t['poly'])) * MM_TO_PT + 10
                 step = 2.2 * MM_TO_PT
-                # 45 deg diagonals
                 s = min_x - (max_y - min_y)
                 while s < max_x + (max_y - min_y):
                     c.line(s, min_y, s + (max_y - min_y), max_y)
@@ -673,7 +751,7 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
                     c.line(p1[0] * MM_TO_PT, (page_h - p1[1]) * MM_TO_PT,
                            p2[0] * MM_TO_PT, (page_h - p2[1]) * MM_TO_PT)
 
-                # Part internal fold lines
+                # Compound internal folds
                 for (p1, p2), ftype in part.internal_folds:
                     if ftype == 'valley':
                         c.setStrokeColor(colors.HexColor('#1976D2'))
@@ -728,7 +806,6 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
     """Renders PDF pages to crisp 300 DPI PNG images (2550 x 3300 px for Letter)."""
     doc = fitz.open(pdf_path)
     png_paths = []
-    # 300 DPI / 72 DPI = 4.16666667
     zoom = 300.0 / 72.0
     mat = fitz.Matrix(zoom, zoom)
 
@@ -748,7 +825,7 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
 # =============================================================================
 
 def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
-                 paper_format="LETTER", flap_size_mm=5.5):
+                 paper_format="LETTER", flap_size_mm=5.5, user_scale=None):
     """Executes the complete universal 3D papercraft pipeline."""
     if paper_format.upper() == "A4":
         page_w = 210.0
@@ -765,16 +842,19 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
         print("Notice: No 3D model specified via --input. Generating default low-poly geometric model.")
         model = Model3D.create_default_model()
 
-    # 2. Unfold to 2D Planar Parts with specified flap size
-    print(f"Unfolding 3D mesh into 2D planar papercraft parts (Flap size: {flap_size_mm:.1f} mm)...")
-    parts = unfold_model_to_parts(model, target_scale=1.0, flap_size_mm=flap_size_mm)
+    # 2. Intelligent Auto-Scale Detection (Meters -> mm)
+    scale = compute_auto_scale(model.vertices, user_scale=user_scale)
+
+    # 3. Unfold to 2D Planar Parts with specified flap size
+    print(f"Unfolding 3D mesh into 2D planar papercraft parts (Flap size: {flap_size_mm:.1f} mm, Scale: {scale:.1f}x)...")
+    parts = unfold_model_to_parts(model, target_scale=scale, flap_size_mm=flap_size_mm)
     print(f"Unfolded into {len(parts)} papercraft parts.")
 
-    # 3. Bin Pack onto Pages
+    # 4. Bin Pack onto Pages
     pages = pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0)
     print(f"Packed into {len(pages)} sheet(s) [Format: {paper_format}, Margins: >= 15mm, Gaps: >= 5mm, Flaps: {flap_size_mm}mm].")
 
-    # 4. Generate All 4 Variations
+    # 5. Generate All 4 Variations
     variations = [
         (1, "1_full_color_with_lines", "Full Color + Fold Lines + Edge IDs"),
         (2, "2_full_color_no_lines",   "Full Color (Clean Outlines Only)"),
@@ -795,7 +875,7 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
         export_pdf_pages(pages, page_w, page_h, pdf_path, variation=var_id)
         print(f"  -> Generated Vector PDF: {pdf_path}")
 
-        # SVG Export (individual pages)
+        # SVG Export
         for p_idx, page_parts in enumerate(pages):
             svg_path = os.path.join(var_dir, f"papercraft_template_page{p_idx + 1}.svg")
             export_svg_page(page_parts, p_idx + 1, total_pages, page_w, page_h, svg_path, variation=var_id)
@@ -813,6 +893,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--input", "-i", type=str, default=None,
                         help="Path to any 3D model file (.obj)")
+    parser.add_argument("--scale", type=float, default=None,
+                        help="Scale multiplier (default: auto-detected, 1000 for meters, 1 for mm)")
     parser.add_argument("--texture", "-t", type=str, default=None,
                         help="Path to texture image (PNG/JPG)")
     parser.add_argument("--outdir", "-o", type=str, default="exports",
@@ -828,5 +910,6 @@ if __name__ == "__main__":
         texture_path=args.texture,
         outdir=args.outdir,
         paper_format=args.format,
-        flap_size_mm=args.flap_size
+        flap_size_mm=args.flap_size,
+        user_scale=args.scale
     )
