@@ -239,7 +239,7 @@ def generate_outward_flap(poly, p1, p2, depth=5.5, taper_angle=45.0):
 # 3. UNIVERSAL MESH UNWRAPPER & PACKING ENGINE
 # =============================================================================
 
-def unfold_model_to_parts(model, target_scale=1.0):
+def unfold_model_to_parts(model, target_scale=1.0, flap_size_mm=5.5):
     """
     Transforms any 3D model into an optimal collection of 2D unfolded papercraft parts.
     If UVs are present, constructs 2D islands using texture coordinates.
@@ -255,11 +255,9 @@ def unfold_model_to_parts(model, target_scale=1.0):
 
     if has_uv:
         # Group faces into UV islands
-        # For simplicity and robust clean output, we construct 2D planar islands from faces
         pass
 
     # Generic 3D unroller: group coplanar or smoothly connected faces into islands
-    # We construct individual islands for distinct facets/planes
     face_normals = []
     for f in model.faces:
         verts = [model.vertices[vi] for vi in f['v']]
@@ -278,17 +276,13 @@ def unfold_model_to_parts(model, target_scale=1.0):
         else:
             face_normals.append((0.0, 0.0, 1.0))
 
-    # Cluster adjacent faces or create distinct unfolded islands
-    # To ensure robust 100% universal compatibility for any mesh,
-    # project each face or face-group into 2D preserving exact 3D edge lengths.
     for idx, f in enumerate(model.faces):
         part = PaperPart(part_id=idx + 1, name=f"Part {idx + 1}")
         verts = [model.vertices[vi] for vi in f['v']]
         n = face_normals[idx]
 
-        # 3D to 2D local projection (Gram-Schmidt orthonormal basis)
+        # 3D to 2D local projection
         v0 = verts[0]
-        # Choose u-axis along first edge
         e0 = (verts[1][0] - v0[0], verts[1][1] - v0[1], verts[1][2] - v0[2])
         e0_len = math.hypot(e0[0], math.hypot(e0[1], e0[2]))
         if e0_len < 1e-6:
@@ -296,7 +290,6 @@ def unfold_model_to_parts(model, target_scale=1.0):
         else:
             u_axis = (e0[0] / e0_len, e0[1] / e0_len, e0[2] / e0_len)
 
-        # v-axis = n x u
         v_axis = (
             n[1] * u_axis[2] - n[2] * u_axis[1],
             n[2] * u_axis[0] - n[0] * u_axis[2],
@@ -311,7 +304,6 @@ def unfold_model_to_parts(model, target_scale=1.0):
             poly2d.append((pu * target_scale, pv * target_scale))
 
         part.poly2d = poly2d
-        # Edges
         for k in range(len(poly2d)):
             p1 = poly2d[k]
             p2 = poly2d[(k + 1) % len(poly2d)]
@@ -319,11 +311,8 @@ def unfold_model_to_parts(model, target_scale=1.0):
 
         parts.append(part)
 
-    # If the mesh has multiple parts, merge pairs across shared edges to create compound multi-face nets
     merged_parts = merge_connected_faces(parts, model, target_scale)
-
-    # Assign alternating glue tabs and edge IDs
-    assign_alternating_tabs_and_ids(merged_parts, model)
+    assign_alternating_tabs_and_ids(merged_parts, model, flap_size_mm=flap_size_mm)
 
     return merged_parts
 
@@ -341,27 +330,29 @@ def merge_connected_faces(parts, model, scale):
     return parts
 
 
-def assign_alternating_tabs_and_ids(parts, model):
+def assign_alternating_tabs_and_ids(parts, model, flap_size_mm=5.5):
     """
     Strict Alternating Tab Assignment Algorithm:
     Identifies all seam pairs between adjacent 3D faces.
     Exactly ONE side receives an outward glue tab with cross-hatch fill and ID badge.
     The mating side remains a clean cut line, with its ID placed 2.5mm OUTSIDE on scrap margin.
     Alternates tab placement around part perimeters to guarantee zero tab collisions.
+    
+    Args:
+        parts: List of PaperPart objects.
+        model: 3D model geometry.
+        flap_size_mm: Depth/size of outward glue flap in millimeters.
     """
-    # Track 3D edges: sorted tuple of vertex indices (v_min, v_max) -> [ (part_idx, edge_idx), ... ]
     edge_map = {}
     for p_idx, part in enumerate(parts):
         poly = part.poly2d
         for e_idx in range(len(poly)):
             p1 = poly[e_idx]
             p2 = poly[(e_idx + 1) % len(poly)]
-            # Quantized spatial key for robust boundary matching
             k = (round(min(p1[0], p2[0]), 2), round(min(p1[1], p2[1]), 2),
                  round(max(p1[0], p2[0]), 2), round(max(p1[1], p2[1]), 2))
             edge_map.setdefault(k, []).append((p_idx, e_idx))
 
-    # Alternating assignment
     seam_counter = 1
     processed_edges = set()
 
@@ -374,21 +365,17 @@ def assign_alternating_tabs_and_ids(parts, model):
 
             p1 = poly[e_idx]
             p2 = poly[(e_idx + 1) % len(poly)]
-
-            # Check if this edge has a mate in another part or same part
-            # Standard parity rule: alternate tabs on even edge indices
             has_tab = (e_idx % 2 == 0)
 
             if has_tab:
-                # Add outward trapezoidal tab
-                flap_poly = generate_outward_flap(poly, p1, p2, depth=5.5, taper_angle=45.0)
+                # Add outward trapezoidal tab with specified flap size in mm
+                flap_poly = generate_outward_flap(poly, p1, p2, depth=flap_size_mm, taper_angle=45.0)
                 part.tabs.append({
                     'edge': (p1, p2),
                     'poly': flap_poly,
                     'id': seam_counter
                 })
             else:
-                # Add external ID label outside the cut line
                 nx, ny = compute_outward_normal(poly, p1, p2)
                 mx = (p1[0] + p2[0]) * 0.5 + 2.5 * nx
                 my = (p1[1] + p2[1]) * 0.5 + 2.5 * ny
@@ -761,7 +748,7 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
 # =============================================================================
 
 def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
-                 paper_format="LETTER"):
+                 paper_format="LETTER", flap_size_mm=5.5):
     """Executes the complete universal 3D papercraft pipeline."""
     if paper_format.upper() == "A4":
         page_w = 210.0
@@ -778,14 +765,14 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
         print("Notice: No 3D model specified via --input. Generating default low-poly geometric model.")
         model = Model3D.create_default_model()
 
-    # 2. Unfold to 2D Planar Parts
-    print("Unfolding 3D mesh into 2D planar papercraft parts...")
-    parts = unfold_model_to_parts(model, target_scale=1.0)
+    # 2. Unfold to 2D Planar Parts with specified flap size
+    print(f"Unfolding 3D mesh into 2D planar papercraft parts (Flap size: {flap_size_mm:.1f} mm)...")
+    parts = unfold_model_to_parts(model, target_scale=1.0, flap_size_mm=flap_size_mm)
     print(f"Unfolded into {len(parts)} papercraft parts.")
 
     # 3. Bin Pack onto Pages
     pages = pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0)
-    print(f"Packed into {len(pages)} sheet(s) [Format: {paper_format}, Margins: >= 15mm, Gaps: >= 5mm].")
+    print(f"Packed into {len(pages)} sheet(s) [Format: {paper_format}, Margins: >= 15mm, Gaps: >= 5mm, Flaps: {flap_size_mm}mm].")
 
     # 4. Generate All 4 Variations
     variations = [
@@ -832,11 +819,14 @@ if __name__ == "__main__":
                         help="Output directory for generated templates")
     parser.add_argument("--format", "-f", type=str, default="LETTER",
                         choices=["LETTER", "A4"], help="Paper format (LETTER or A4)")
+    parser.add_argument("--flap-size", "-s", type=float, default=5.5,
+                        help="Depth/size of glue flaps in millimeters (default: 5.5 mm)")
 
     args = parser.parse_args()
     run_pipeline(
         input_model_path=args.input,
         texture_path=args.texture,
         outdir=args.outdir,
-        paper_format=args.format
+        paper_format=args.format,
+        flap_size_mm=args.flap_size
     )

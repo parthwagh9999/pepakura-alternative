@@ -12,7 +12,7 @@ This pipeline transforms **ANY 3D polygonal model (.obj or Blender mesh)** into 
 * **Print Resolution**: **300 DPI** ($2550 \times 3300\text{ pixels}$ per page).
 * **Page Margins**: Strict **$15.0\text{ mm}$ margin** from all 4 sheet edges ($X \in [15.0, 200.9]\text{ mm}$, $Y \in [15.0, 264.4]\text{ mm}$).
 * **Part Clearance**: Strict **$\ge 5.0\text{ mm}$ gap** between all adjacent parts across all sheets.
-* **Glue Flaps**: **100% Outward** geometry ($45^\circ$ base angle) with **faint grey fill (`#E6E6E6`)** and a **minimal $45^\circ$ diagonal cross-lined diamond pattern** (`#B8B8B8`, 2.2mm pitch) for instant visual distinction from model facets.
+* **Glue Flap Size**: Fully configurable in **millimeters (mm)** via CLI (`--flap-size <mm>`), Web Studio slider, and Blender panel (default: **$5.5\text{ mm}$**, range $2.0 - 20.0\text{ mm}$). 100% outward geometry with $45^\circ$ base angle, faint grey fill (`#E6E6E6`), and fine diagonal cross-lined diamond grip pattern (`#B8B8B8`, 2.2mm pitch).
 * **Edge IDs**: Numbers on flaps are centered inside the tab body with a circular protective `#E6E6E6` badge. Numbers on mating cut edges sit **$2.5\text{ mm}$ outside the cut lines in scrap paper margins**—never printed over facet artwork.
 * **Fold Line Distinction**:
   * **Mountain Folds**: Dashed Red (`#D32F2F`, stroke `6,2.5`).
@@ -65,7 +65,7 @@ The pipeline applies an automated topology solver to any arbitrary 3D mesh:
 ```
 
 1. **Seam Detection**: Every shared 3D edge between adjacent faces or UV boundary seams is identified and indexed ($1, 2, \dots, N$).
-2. **Alternating Parity Rule**: For each mating pair of edges across cut boundaries, exactly **one edge** receives an outward glue tab ($45^\circ$ trapezoid), while the **mating edge** remains a clean cut line. Flaps alternate along the perimeter of connected islands to prevent physical tab collision.
+2. **Alternating Parity Rule**: For each mating pair of edges across cut boundaries, exactly **one edge** receives an outward glue tab ($45^\circ$ trapezoid, depth configured in mm), while the **mating edge** remains a clean cut line. Flaps alternate along the perimeter of connected islands to prevent physical tab collision.
 3. **Dihedral Crease Classification**:
    * **Mountain Fold**: Convex 3D ridges (dihedral fold $< 180^\circ$, folding away from viewer) are marked with red dashed lines.
    * **Valley Fold**: Concave 3D troughs (dihedral fold $> 180^\circ$, folding toward viewer) are marked with blue dash-dot lines.
@@ -76,57 +76,78 @@ The pipeline applies an automated topology solver to any arbitrary 3D mesh:
 
 ---
 
-## 5. How to Run the Pipeline on Any 3D Object
+## 5. How to Run the Pipeline
 
-This repository contains clean, portable Python and Blender scripts along with full-resolution sample template outputs. It can be cloned directly to any Windows, macOS, or Linux machine.
+Clone the repository and install the minimal dependencies:
 
-### Prerequisites & Installation
-1. Install Python 3.10+ (or use Blender 4.x / 5.x bundled Python).
-2. Install the required dependencies:
 ```bash
+git clone https://github.com/parthwagh9999/pepakura-alternative.git
+cd pepakura-alternative
 pip install -r requirements.txt
 ```
 *(Dependencies: `reportlab>=4.0.0`, `Pillow>=10.0.0`, `pymupdf>=1.23.0`)*
 
 ---
 
-### Method A: Universal Standalone Python CLI (`pepakura_alternative_workflow.py`)
+### Method A: Interactive Web Studio (`app.py`) ⭐ Recommended
 
-Run the generator on **ANY 3D .OBJ file**:
+Launch the interactive local web application (requires zero additional web frameworks):
 
 ```bash
-# Run on any 3D OBJ model
-python pepakura_alternative_workflow.py --input "path/to/my_model.obj"
-
-# Run with a custom texture image
-python pepakura_alternative_workflow.py --input "my_model.obj" --texture "my_texture.png"
-
-# Specify a custom export directory
-python pepakura_alternative_workflow.py --input "my_model.obj" --outdir "my_papercraft_deliverables"
-
-# Switch paper format to A4 (default is US Letter)
-python pepakura_alternative_workflow.py --input "my_model.obj" --format A4
-
-# Standard demo run (creates a geometric polyhedral papercraft model if no file is provided)
-python pepakura_alternative_workflow.py
+python app.py
 ```
+Then open **`http://localhost:8080`** in any web browser.
 
-**Output Generated Automatically:**
-When executed, the pipeline creates 4 subfolders containing:
-* **Multi-page Vector PDFs** (US Letter format $8.5 \times 11.0$ in, $\ge 15.0\text{ mm}$ page margins, $\ge 5.0\text{ mm}$ part gaps).
-* **Layered Vector SVGs** (Clean cut path, mountain/valley fold dashed strokes, flap cross-hatch pattern, external registration marks).
-* **Ultra-Crisp 300 DPI PNGs** ($2550 \times 3300\text{ pixels}$ per page) for high-end digital print bureaus.
+**Features:**
+* **Drag-and-Drop 3D Upload**: Drag any `.obj` model file directly into the browser.
+* **Live 3D Viewport**: Interactive 3D preview powered by Three.js (rotate, pan, zoom).
+* **Flap Size Slider (mm)**: Real-time control of glue tab size in millimeters (2.0 mm to 20.0 mm).
+* **Paper Format & Margins**: Toggle US Letter or A4, configure sheet margins in mm.
+* **Instant Vector Preview**: Live interactive multi-sheet SVG viewer with tab navigation.
+* **Direct Downloads**: One-click download buttons for Vector PDF, Layered Plotter SVG, and 300 DPI PNG.
 
 ---
 
-### Method B: Blender Add-on (`papercraft_plotter_tool.py`)
+### Method B: Universal Standalone Python CLI (`pepakura_alternative_workflow.py`)
+
+Run the pipeline from terminal or command prompt with full parameter control:
+
+```bash
+# 1. Run on any 3D OBJ model with default flap size (5.5 mm)
+python pepakura_alternative_workflow.py --input "path/to/my_model.obj"
+
+# 2. Configure custom flap size in millimeters (e.g. 7.0 mm flaps)
+python pepakura_alternative_workflow.py --input "my_model.obj" --flap-size 7.0
+
+# 3. Specify custom texture image and output directory
+python pepakura_alternative_workflow.py --input "my_model.obj" --texture "my_texture.png" --outdir "my_templates"
+
+# 4. Switch paper format to A4 (default is US Letter)
+python pepakura_alternative_workflow.py --input "my_model.obj" --format A4 --flap-size 6.0
+
+# 5. Quick demo run (generates a geometric polyhedral papercraft model if no file is provided)
+python pepakura_alternative_workflow.py
+```
+
+**CLI Options Reference:**
+* `--input`, `-i`: Path to any 3D model file (`.obj`).
+* `--flap-size`, `-s`: Depth/size of glue flaps in millimeters (default: `5.5` mm).
+* `--format`, `-f`: Paper format: `LETTER` (default, 8.5x11 in) or `A4` (210x297 mm).
+* `--texture`, `-t`: Path to texture image map (`PNG` or `JPG`).
+* `--outdir`, `-o`: Output directory for generated deliverables (default: `exports`).
+
+---
+
+### Method C: Blender Add-on (`papercraft_plotter_tool.py`)
+
 1. Open Blender (v4.0 to v5.2+).
 2. Go to **Edit $\rightarrow$ Preferences $\rightarrow$ Add-ons $\rightarrow$ Install...** and select `papercraft_plotter_tool.py`.
 3. Enable **Mesh: Pepakura Alternative & Plotter Papercraft Tool**.
 4. In the 3D Viewport, select **ANY 3D Mesh**, press `N` to open the sidebar and navigate to the **Pepakura Alternative** tab.
-5. Process your model:
+5. In the sidebar panel:
+   * Adjust **Flap Size (mm)** (default: 5.5 mm) and **Flap Base Angle** (45°).
    * Click **Clean & Planarize (Plotter Ready)** to snap non-planar quads and weld micro-gaps.
-   * Click **Setup Geometry Nodes (Outward Tabs)** to automatically build UV unwrap, tab extrusion ($45^\circ$), and plotter cut/fold attribute trees in the viewport.
+   * Click **Setup Geometry Nodes (Outward Tabs)** to visualize UV unwrap and tab extrusion in the viewport.
    * Click **Generate Pepakura Alternative Deliverables** to export all 4 variations for the active mesh.
 
 ---
@@ -135,12 +156,13 @@ When executed, the pipeline creates 4 subfolders containing:
 
 ```
 pepakura-alternative/
-├── pepakura_alternative_workflow.py # Universal standalone generator (all 4 variations, PDF/SVG/300 DPI PNG)
+├── app.py                           # Interactive Web Studio (local web interface with 3D viewer)
+├── pepakura_alternative_workflow.py # Universal standalone generator (CLI, all 4 variations, PDF/SVG/PNG)
 ├── papercraft_plotter_tool.py       # Blender Add-on with UI panel, mesh cleanup, & node generation
 ├── build_exact_nodes.py             # Script to build Geometry Nodes tree via Blender Python
 ├── requirements.txt                 # Python dependencies (reportlab, Pillow, pymupdf)
-├── .gitignore                       # Git ignore rules
-├── README.md                        # Complete workflow guide and visual documentation
+├── .gitignore                       # Clean ignore rules
+├── README.md                        # Complete documentation featuring visual image showcase & guides
 └── examples/
     ├── colored_and_lined_page1_300dpi.png # 300 DPI Sheet 1 (Full Color + Fold Lines + Edge IDs)
     ├── colored_and_lined_page2_300dpi.png # 300 DPI Sheet 2 (Full Color + Fold Lines + Edge IDs)

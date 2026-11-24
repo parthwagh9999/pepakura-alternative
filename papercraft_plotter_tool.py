@@ -20,6 +20,13 @@ import os
 
 class PepakuraAlternativeSettings(bpy.types.PropertyGroup):
     # Flap & Edge ID settings
+    flap_depth_mm: bpy.props.FloatProperty(
+        name="Flap Size (mm)",
+        description="Depth/size of glue flaps in millimeters",
+        default=5.5,
+        min=2.0,
+        max=20.0
+    )
     flap_angle_deg: bpy.props.FloatProperty(
         name="Flap Base Angle",
         description="Default base angle of flap in degrees (Pepakura Alternative standard is 45 deg)",
@@ -367,7 +374,8 @@ class EXPORT_OT_pepakura_alternative_package(bpy.types.Operator):
 
         # Export active object to OBJ and run generator
         obj = context.active_object
-        cmd = ["python", pkg_script]
+        settings = context.scene.pepakura_alternative_settings
+        cmd = ["python", pkg_script, "--flap-size", str(settings.flap_depth_mm)]
         if obj and obj.type == 'MESH':
             import tempfile
             temp_obj = os.path.join(tempfile.gettempdir(), f"{obj.name}_export.obj")
@@ -424,6 +432,7 @@ class VIEW3D_PT_pepakura_alternative(bpy.types.Panel):
         
         pbox = layout.box()
         pbox.label(text="Flap & Pattern Settings", icon='SNAP_EDGE')
+        pbox.prop(settings, "flap_depth_mm")
         pbox.prop(settings, "flap_angle_deg")
         pbox.prop(settings, "edge_id_font_size")
         pbox.prop(settings, "grid_spacing_mm")
