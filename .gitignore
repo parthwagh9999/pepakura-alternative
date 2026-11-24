@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output directories & generated files
+exports/
+*.pdf
+*.svg
+*.png
+*.jpg
+*.jpeg
+
+# Allow included sample images in examples/
+!examples/*.png
+
+# 3D assets (ensuring repository contains pure code only)
+*.obj
+*.mtl
+*.blend
+*.blend1
+
+# Environment & IDE
+.env
+.venv/
+venv/
+.idea/
+.vscode/

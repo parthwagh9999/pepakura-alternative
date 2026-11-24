@@ -1,0 +1,4 @@
+# Python dependencies for Pepakura Alternative 3D Papercraft Pipeline
+reportlab>=4.0.0
+Pillow>=10.0.0
+pymupdf>=1.23.0
