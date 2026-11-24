@@ -139,6 +139,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
           </select>
         </div>
 
+        <!-- Topology Scope & Roadmap Tip -->
+        <div class="p-2.5 bg-amber-50 border border-amber-200/70 rounded-lg text-[11px] text-amber-800 space-y-0.5">
+          <p class="font-semibold flex items-center gap-1">
+            <span>💡 Current Scope &amp; Roadmap:</span>
+          </p>
+          <p class="text-amber-700 leading-normal">
+            Highly efficient for low-poly models with grouped polygons. Individual planar faces unfold with alternating glue tabs. Interactive edge joining and seam splitting will be introduced in future updates.
+          </p>
+        </div>
+
         <!-- Generate Button -->
         <button id="btn-generate" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold text-sm shadow-sm transition flex items-center justify-center space-x-2">
           <span>✨ Generate Papercraft Templates</span>

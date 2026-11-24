@@ -168,3 +168,19 @@ pepakura-alternative/
     ├── colored_and_lined_page2_300dpi.png # 300 DPI Sheet 2 (Full Color + Fold Lines + Edge IDs)
     └── colored_and_lined_preview.png      # Side-by-side verification preview
 ```
+
+---
+
+## 7. Current Scope, Limitations & Future Roadmap
+
+> [!NOTE] Current Mesh Topology Scope
+> The pipeline is currently **highly efficient for low-poly 3D models** and meshes where polygons are organized into planar groups or compact islands.
+>
+> In the current implementation:
+> * Individual non-UV planar faces are unfolded into separate papercraft parts, each equipped with alternating perimeter glue tabs ($45^\circ$, depth in mm) and protected ID badges.
+> * This guarantees **zero internal polygon self-intersection** and clean perimeter tab placement across any arbitrary mesh.
+
+### 🔮 Future Roadmap:
+* **Interactive Edge Joining & Splitting**: A visual, interactive tool to click edges and join adjacent polygons into contiguous compound nets, or split joined islands along specific crease seams (mirroring manual Pepakura seam-editing).
+* **Automated Greedy Island Aggregator**: Advanced curvature-based heuristic solver to automatically stitch coplanar and nearly-coplanar adjacent polygons into compound printable nets.
+* **Custom Flap Placement Overrides**: Ability to manually flip or override tab side assignments per individual edge.
