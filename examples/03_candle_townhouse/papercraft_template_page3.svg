@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="215.9mm" height="279.4mm" viewBox="0 0 215.9 279.4">
+  <defs>
+    <pattern id="flap_crosshatch" width="2.2" height="2.2" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">
+      <rect width="2.2" height="2.2" fill="#E6E6E6"/>
+      <line x1="0" y1="0" x2="0" y2="2.2" stroke="#B8B8B8" stroke-width="0.32"/>
+      <line x1="0" y1="0" x2="2.2" y2="0" stroke="#B8B8B8" stroke-width="0.32"/>
+    </pattern>
+  </defs>
+  <!-- OPTICAL REGISTRATION MARKS -->
+  <g id="REGISTRATION_MARKS" fill="#000000">
+    <rect x="15.0" y="3.0" width="5" height="5"/>
+    <rect x="195.9" y="3.0" width="5" height="5"/>
+  </g>
+  <!-- HEADER & LEGEND SWATCHES -->
+  <text x="24" y="6.8" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="3.2" fill="#111111">3D Papercraft Template (Pepakura Alternative) — Page 3/6</text>
+  <g id="LEGEND" transform="translate(24, 11.2)" font-family="Helvetica, Arial, sans-serif" font-size="2.0" fill="#333333">
+    <line x1="0" y1="0" x2="8" y2="0" stroke="#000000" stroke-width="0.4"/>
+    <text x="10" y="0.7">Solid: Cut Line</text>
+    <line x1="32" y1="0" x2="40" y2="0" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <text x="42" y="0.7">Dashed Red: Mountain Fold (_ _ _)</text>
+    <line x1="88" y1="0" x2="96" y2="0" stroke="#1976D2" stroke-width="0.4" stroke-dasharray="2.0,0.7,0.5,0.7"/>
+    <text x="98" y="0.7">Dash-Dot Blue: Valley Fold (_ . _ .)</text>
+    <rect x="142" y="-1.8" width="6" height="3.5" fill="url(#flap_crosshatch)" stroke="#777777" stroke-width="0.25"/>
+    <text x="150" y="0.7">Flap (Cross-lined)</text>
+  </g>
+  <!-- PART FACETS -->
+  <g id="FACETS" fill="#FBF9F5" stroke="none">
+    <polygon points="15.00,20.50 104.80,20.50 104.80,179.38 15.00,179.38"/>
+  </g>
+  <!-- GLUE TABS (OUTWARD 45° WITH CROSS-HATCH PATTERN) -->
+  <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="none">
+    <polygon points="15.00,20.50 20.50,15.00 99.30,15.00 104.80,20.50"/>
+    <polygon points="104.80,20.50 110.30,26.00 110.30,173.88 104.80,179.38"/>
+    <polygon points="104.80,179.38 99.30,184.88 20.50,184.88 15.00,179.38"/>
+  </g>
+  <!-- INTERNAL CREASE LINES -->
+  <g id="FOLD_LINES">
+    <line x1="15.00" y1="20.50" x2="104.80" y2="20.50" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="104.80" y1="20.50" x2="104.80" y2="179.38" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="104.80" y1="179.38" x2="15.00" y2="179.38" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+  </g>
+  <!-- CUT OUTLINES -->
+  <g id="CUT_LINES" fill="none" stroke="#000000" stroke-width="0.4">
+    <polygon points="15.00,20.50 20.50,15.00 99.30,15.00 104.80,20.50 110.30,26.00 110.30,173.88 104.80,179.38 99.30,184.88 20.50,184.88 15.00,179.38"/>
+  </g>
+  <!-- EDGE ID NUMBERS (PROTECTED BADGE ON TABS, EXTERIOR IN SCRAP MARGIN) -->
+  <g id="EDGE_IDS" font-family="Helvetica, Arial, sans-serif" font-size="2.2" font-weight="bold" text-anchor="middle" dominant-baseline="central">
+    <circle cx="59.90" cy="17.75" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="59.90" y="17.75" fill="#111111">2</text>
+    <circle cx="107.55" cy="99.94" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="107.55" y="99.94" fill="#111111">8</text>
+    <circle cx="59.90" cy="182.13" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="59.90" y="182.13" fill="#111111">15</text>
+    <text x="13.00" y="99.94" fill="#222222">5</text>
+  </g>
+</svg>

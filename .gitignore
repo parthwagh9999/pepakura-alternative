@@ -11,8 +11,8 @@ exports/
 *.jpg
 *.jpeg
 
-# Allow included sample images in examples/
-!examples/*.png
+# Allow included sample images, vectors, and PDFs in examples/
+!examples/**
 
 # 3D assets (ensuring repository contains pure code only)
 *.obj
