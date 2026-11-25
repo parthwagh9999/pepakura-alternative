@@ -127,6 +127,9 @@ python pepakura_alternative_workflow.py --input "my_model.obj" --format A4 --fla
 
 # 5. Quick demo run (generates a geometric polyhedral papercraft model if no file is provided)
 python pepakura_alternative_workflow.py
+
+# 6. Enable Smart Flap-Aware Edge Joining (joins adjacent faces into fold-lined islands)
+python pepakura_alternative_workflow.py --input "my_model.obj" --join-edges
 ```
 
 **CLI Options Reference:**
@@ -135,6 +138,8 @@ python pepakura_alternative_workflow.py
 * `--format`, `-f`: Paper format: `LETTER` (default, 8.5x11 in) or `A4` (210x297 mm).
 * `--texture`, `-t`: Path to texture image map (`PNG` or `JPG`).
 * `--outdir`, `-o`: Output directory for generated deliverables (default: `exports`).
+* `--scale`: Optional manual scale override (default: auto-detected from meters/cm/mm).
+* `--join-edges`: Intelligently join faces along shared fold edges (with circular/conical flap-overlap prevention, margin checking, and concave nesting) to minimize cutting and gluing.
 
 ---
 
@@ -171,16 +176,14 @@ pepakura-alternative/
 
 ---
 
-## 7. Current Scope, Limitations & Future Roadmap
+## 7. Current Scope, Automated Edge Joining & Future Roadmap
 
-> [!NOTE] Current Mesh Topology Scope
-> The pipeline is currently **highly efficient for low-poly 3D models** and meshes where polygons are organized into planar groups or compact islands.
->
-> In the current implementation:
-> * Individual non-UV planar faces are unfolded into separate papercraft parts, each equipped with alternating perimeter glue tabs ($45^\circ$, depth in mm) and protected ID badges.
-> * This guarantees **zero internal polygon self-intersection** and clean perimeter tab placement across any arbitrary mesh.
+> [!NOTE] Flap-Aware Island Joining & Scale Integrity
+> The pipeline supports both **per-face unfolding** and **automated flap-aware edge joining (`--join-edges`)**:
+> * **Strict Scale Preservation**: Exact 1:1 millimeter model dimensions and configured flap sizes are never modified during joining or sheet packing.
+> * **Circular / Conical Overlap & Clutter Guard**: Validates that joined fans and strips have zero self-overlap, zero flap-to-face/flap-to-flap clutter (auto-mitering sharp $< 92^\circ$ corners), and fit cleanly within strict $\ge 15.0\text{ mm}$ sheet margins.
+> * **Polygon-Aware Concave Nesting**: Uses true polygon-to-polygon clearance ($\ge 5.0\text{ mm}$) to pack smaller parts cleanly around curved islands on minimal pages.
 
 ### 🔮 Future Roadmap:
-* **Interactive Edge Joining & Splitting**: A visual, interactive tool to click edges and join adjacent polygons into contiguous compound nets, or split joined islands along specific crease seams (mirroring manual Pepakura seam-editing).
-* **Automated Greedy Island Aggregator**: Advanced curvature-based heuristic solver to automatically stitch coplanar and nearly-coplanar adjacent polygons into compound printable nets.
-* **Custom Flap Placement Overrides**: Ability to manually flip or override tab side assignments per individual edge.
+* **Interactive Visual Edge Joining & Splitting**: Browser-based click-to-toggle seam editor to manually join or split specific edges inside the Web Studio.
+* **Custom Flap Placement Overrides**: Manual override controls per individual seam edge.

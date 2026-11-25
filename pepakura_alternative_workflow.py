@@ -29,11 +29,13 @@ Accepts ANY 3D model (.obj) and produces production-grade vector templates:
 
 import os
 import sys
+import copy
 import math
 import base64
 import argparse
 from io import BytesIO
 from PIL import Image
+import numpy as np
 
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
@@ -187,6 +189,8 @@ class PaperPart:
         self.tabs = []               # [ {'edge': (p1, p2), 'poly': [...], 'id': int}, ... ]
         self.edge_labels = []        # [ {'pos': (x,y), 'id': int}, ... ]
         self.texture_crop = None     # PIL Image or None
+        self.sub_faces = []          # Multi-face island sub-polygons [{'fi', 'poly2d', ...}]
+        self._tex_img = None         # Reference to source texture for non-90° re-baking
 
     def compute_poly_bounds(self):
         if not self.poly2d:
@@ -211,6 +215,8 @@ class PaperPart:
 
     def translate(self, dx, dy):
         self.poly2d = [(p[0] + dx, p[1] + dy) for p in self.poly2d]
+        for sf in self.sub_faces:
+            sf['poly2d'] = [(p[0] + dx, p[1] + dy) for p in sf['poly2d']]
         self.internal_folds = [
             (((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)), ftype)
             for (p1, p2), ftype in self.internal_folds
@@ -221,6 +227,19 @@ class PaperPart:
             t['poly'] = [(p[0] + dx, p[1] + dy) for p in t['poly']]
         for l in self.edge_labels:
             l['pos'] = (l['pos'][0] + dx, l['pos'][1] + dy)
+
+    def snapshot_geometry(self):
+        return copy.deepcopy((
+            self.poly2d, self.sub_faces, self.internal_folds, self.tabs, self.edge_labels
+        ))
+
+    def restore_geometry(self, snap):
+        p, sf, inf, tb, el = copy.deepcopy(snap)
+        self.poly2d = p
+        self.sub_faces = sf
+        self.internal_folds = inf
+        self.tabs = tb
+        self.edge_labels = el
 
 
 def compute_outward_normal(poly, p1, p2):
@@ -326,15 +345,690 @@ def project_face_to_2d(verts_3d):
     return poly2d, norm
 
 
-def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5, texture_path=None):
+# =============================================================================
+# 2B. POLYGON CLEARANCE, FLAP COLLISION, AFFINE TEXTURE & ISLAND JOINING
+# =============================================================================
+
+def _dist3d(a, b):
+    return math.hypot(a[0] - b[0], math.hypot(a[1] - b[1], a[2] - b[2]))
+
+
+def _cross2(o, a, b):
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _segs_strict_intersect(a1, a2, b1, b2, eps=1e-4):
+    d1 = _cross2(b1, b2, a1)
+    d2 = _cross2(b1, b2, a2)
+    d3 = _cross2(a1, a2, b1)
+    d4 = _cross2(a1, a2, b2)
+    return ((d1 > eps and d2 < -eps) or (d1 < -eps and d2 > eps)) and \
+           ((d3 > eps and d4 < -eps) or (d3 < -eps and d4 > eps))
+
+
+def _point_in_poly_strict(pt, poly, boundary_tol=0.05):
+    x, y = pt
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        l2 = dx * dx + dy * dy
+        if l2 > 1e-12:
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / l2))
+            if math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) < boundary_tol:
+                return False
+    inside = False
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
+            inside = not inside
+    return inside
+
+
+def polys_strictly_overlap(p1, p2, tol=0.05):
+    """Returns True if two 2D polygons overlap strictly inside each other's interiors."""
+    if (max(p[0] for p in p1) <= min(p[0] for p in p2) + tol or
+            max(p[0] for p in p2) <= min(p[0] for p in p1) + tol or
+            max(p[1] for p in p1) <= min(p[1] for p in p2) + tol or
+            max(p[1] for p in p2) <= min(p[1] for p in p1) + tol):
+        return False
+    n1, n2 = len(p1), len(p2)
+    for i in range(n1):
+        for j in range(n2):
+            if _segs_strict_intersect(p1[i], p1[(i + 1) % n1], p2[j], p2[(j + 1) % n2]):
+                return True
+    pts1 = list(p1) + [
+        (p1[i][0] * (1 - t) + p1[(i + 1) % n1][0] * t, p1[i][1] * (1 - t) + p1[(i + 1) % n1][1] * t)
+        for i in range(n1) for t in (0.25, 0.5, 0.75)
+    ] + [(sum(p[0] for p in p1) / n1, sum(p[1] for p in p1) / n1)]
+    pts2 = list(p2) + [
+        (p2[i][0] * (1 - t) + p2[(i + 1) % n2][0] * t, p2[i][1] * (1 - t) + p2[(i + 1) % n2][1] * t)
+        for i in range(n2) for t in (0.25, 0.5, 0.75)
+    ] + [(sum(p[0] for p in p2) / n2, sum(p[1] for p in p2) / n2)]
+    for pt in pts1:
+        if _point_in_poly_strict(pt, p2, boundary_tol=tol):
+            return True
+    for pt in pts2:
+        if _point_in_poly_strict(pt, p1, boundary_tol=tol):
+            return True
+    return False
+
+
+def _seg_to_seg_dist(a1, a2, b1, b2):
+    if _segs_strict_intersect(a1, a2, b1, b2, eps=1e-6):
+        return 0.0
+    def pt_seg_dist(p, s1, s2):
+        dx, dy = s2[0] - s1[0], s2[1] - s1[1]
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-12:
+            return math.hypot(p[0] - s1[0], p[1] - s1[1])
+        t = max(0.0, min(1.0, ((p[0] - s1[0]) * dx + (p[1] - s1[1]) * dy) / l2))
+        return math.hypot(p[0] - (s1[0] + t * dx), p[1] - (s1[1] + t * dy))
+    return min(pt_seg_dist(a1, b1, b2), pt_seg_dist(a2, b1, b2),
+               pt_seg_dist(b1, a1, a2), pt_seg_dist(b2, a1, a2))
+
+
+def poly_min_dist(p1, p2):
+    """Exact minimum Euclidean distance between two closed 2D polygons (0.0 if overlapping)."""
+    if polys_strictly_overlap(p1, p2, tol=0.01):
+        return 0.0
+    md = float('inf')
+    n1, n2 = len(p1), len(p2)
+    for i in range(n1):
+        a1, a2 = p1[i], p1[(i + 1) % n1]
+        for j in range(n2):
+            d = _seg_to_seg_dist(a1, a2, p2[j], p2[(j + 1) % n2])
+            if d < md:
+                md = d
+                if md == 0.0:
+                    return 0.0
+    return md
+
+
+def _flaps_share_tight_corner(fp_a, e_a, fp_b, e_b, min_angle_deg=92.0):
+    """Checks if two flaps meet at a sharp convex corner (< 92°) where 45° bevels collide."""
+    a1, a2 = e_a
+    b1, b2 = e_b
+    pairs = [(a1, a2, b1, b2), (a1, a2, b2, b1), (a2, a1, b1, b2), (a2, a1, b2, b1)]
+    for sa1, sa2, sb1, sb2 in pairs:
+        if math.hypot(sa1[0] - sb1[0], sa1[1] - sb1[1]) < 0.1:
+            va = (sa2[0] - sa1[0], sa2[1] - sa1[1])
+            vb = (sb2[0] - sb1[0], sb2[1] - sb1[1])
+            la, lb = math.hypot(*va), math.hypot(*vb)
+            if la > 1e-4 and lb > 1e-4:
+                cos_t = max(-1.0, min(1.0, (va[0] * vb[0] + va[1] * vb[1]) / (la * lb)))
+                ang = math.degrees(math.acos(cos_t))
+                if ang < min_angle_deg:
+                    return True
+    return False
+
+
+def _miter_flap_against_tabs(fp, edge_pair, existing_tabs):
+    """If an adjacent flap meets at a sharp corner (< 92°), trims the shared corner bevel to bisect."""
+    p1, p2 = edge_pair
+    L = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    if L < 1e-4:
+        return fp
+    ux, uy = (p2[0] - p1[0]) / L, (p2[1] - p1[1]) / L
+    # Deduce outward normal from fp[1] - fp[0]
+    tx, ty = fp[1][0] - p1[0], fp[1][1] - p1[1]
+    proj_u = tx * ux + ty * uy
+    nx_raw, ny_raw = tx - proj_u * ux, ty - proj_u * uy
+    depth = math.hypot(nx_raw, ny_raw)
+    if depth < 1e-4:
+        return fp
+    nx, ny = nx_raw / depth, ny_raw / depth
+
+    off1 = math.hypot(fp[1][0] - p1[0] - depth * nx, fp[1][1] - p1[1] - depth * ny)
+    off2 = math.hypot(fp[2][0] - p2[0] - depth * nx, fp[2][1] - p2[1] - depth * ny)
+
+    for et in existing_tabs:
+        b1, b2 = et['edge']
+        for corner, other_b in ((p1, p2), (p2, p1)):
+            for eb_c, eb_o in ((b1, b2), (b2, b1)):
+                if math.hypot(corner[0] - eb_c[0], corner[1] - eb_c[1]) < 0.1:
+                    va = (other_b[0] - corner[0], other_b[1] - corner[1])
+                    vb = (eb_o[0] - eb_c[0], eb_o[1] - eb_c[1])
+                    la, lb = math.hypot(*va), math.hypot(*vb)
+                    if la > 1e-4 and lb > 1e-4:
+                        cos_t = max(-1.0, min(1.0, (va[0] * vb[0] + va[1] * vb[1]) / (la * lb)))
+                        ang = math.acos(cos_t)
+                        if ang < math.radians(92.0) and ang > 0.1:
+                            req_off = depth / math.tan(ang * 0.5) + 0.15
+                            if corner == p1:
+                                off1 = max(off1, min(L * 0.44, req_off))
+                            else:
+                                off2 = max(off2, min(L * 0.44, req_off))
+    t1 = (p1[0] + off1 * ux + depth * nx, p1[1] + off1 * uy + depth * ny)
+    t2 = (p2[0] - off2 * ux + depth * nx, p2[1] - off2 * uy + depth * ny)
+    return [p1, t1, t2, p2]
+
+
+def bake_island_texture(sub_faces, tex_img, dpi=300):
+    """Per-face affine texture rasterization at 300 DPI across arbitrarily joined/rotated islands."""
+    all_pts = [pt for sf in sub_faces for pt in sf['poly2d']]
+    if not all_pts or tex_img is None:
+        return None
+    min_x, max_x = min(p[0] for p in all_pts), max(p[0] for p in all_pts)
+    min_y, max_y = min(p[1] for p in all_pts), max(p[1] for p in all_pts)
+    w_mm = max(0.5, max_x - min_x)
+    h_mm = max(0.5, max_y - min_y)
+
+    px_per_mm = dpi / 25.4
+    W_out = max(4, min(4000, int(math.ceil(w_mm * px_per_mm))))
+    H_out = max(4, min(4000, int(math.ceil(h_mm * px_per_mm))))
+
+    tex_arr = np.asarray(tex_img.convert('RGB'), dtype=np.uint8)
+    H_tex, W_tex, _ = tex_arr.shape
+
+    out_arr = np.empty((H_out, W_out, 3), dtype=np.uint8)
+    out_arr[:, :, 0] = 251
+    out_arr[:, :, 1] = 249
+    out_arr[:, :, 2] = 245
+
+    sx_scale = W_out / w_mm
+    sy_scale = H_out / h_mm
+
+    for sf in sub_faces:
+        poly = sf['poly2d']
+        uvs = sf.get('uvs', [])
+        if not uvs or len(uvs) < len(poly):
+            continue
+        for k in range(1, len(poly) - 1):
+            x0, y0 = (poly[0][0] - min_x) * sx_scale, (poly[0][1] - min_y) * sy_scale
+            x1, y1 = (poly[k][0] - min_x) * sx_scale, (poly[k][1] - min_y) * sy_scale
+            x2, y2 = (poly[k + 1][0] - min_x) * sx_scale, (poly[k + 1][1] - min_y) * sy_scale
+
+            u0, v0 = uvs[0][0] * (W_tex - 1), (1.0 - uvs[0][1]) * (H_tex - 1)
+            u1, v1 = uvs[k][0] * (W_tex - 1), (1.0 - uvs[k][1]) * (H_tex - 1)
+            u2, v2 = uvs[k + 1][0] * (W_tex - 1), (1.0 - uvs[k + 1][1]) * (H_tex - 1)
+
+            denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+            if abs(denom) < 1e-8:
+                continue
+
+            bx0 = max(0, int(math.floor(min(x0, x1, x2))) - 1)
+            bx1 = min(W_out, int(math.ceil(max(x0, x1, x2))) + 2)
+            by0 = max(0, int(math.floor(min(y0, y1, y2))) - 1)
+            by1 = min(H_out, int(math.ceil(max(y0, y1, y2))) + 2)
+            if bx1 <= bx0 or by1 <= by0:
+                continue
+
+            gx = (np.arange(bx0, bx1, dtype=np.float32) + 0.5)[None, :]
+            gy = (np.arange(by0, by1, dtype=np.float32) + 0.5)[:, None]
+
+            w0 = ((y1 - y2) * (gx - x2) + (x2 - x1) * (gy - y2)) / denom
+            w1 = ((y2 - y0) * (gx - x2) + (x0 - x2) * (gy - y2)) / denom
+            w2 = 1.0 - w0 - w1
+
+            mask = (w0 >= -0.03) & (w1 >= -0.03) & (w2 >= -0.03)
+            if not np.any(mask):
+                continue
+
+            su = np.clip(w0[mask] * u0 + w1[mask] * u1 + w2[mask] * u2, 0.0, W_tex - 1.0)
+            sv = np.clip(w0[mask] * v0 + w1[mask] * v1 + w2[mask] * v2, 0.0, H_tex - 1.0)
+
+            iu0 = np.floor(su).astype(np.int32)
+            iv0 = np.floor(sv).astype(np.int32)
+            iu1 = np.minimum(iu0 + 1, W_tex - 1)
+            iv1 = np.minimum(iv0 + 1, H_tex - 1)
+            fu = (su - iu0)[:, None]
+            fv = (sv - iv0)[:, None]
+
+            c00 = tex_arr[iv0, iu0].astype(np.float32)
+            c10 = tex_arr[iv0, iu1].astype(np.float32)
+            c01 = tex_arr[iv1, iu0].astype(np.float32)
+            c11 = tex_arr[iv1, iu1].astype(np.float32)
+            interp = (c00 * (1 - fu) * (1 - fv) + c10 * fu * (1 - fv) +
+                      c01 * (1 - fu) * fv + c11 * fu * fv).astype(np.uint8)
+            out_arr[by0:by1, bx0:bx1][mask] = interp
+
+    return Image.fromarray(out_arr, mode='RGB')
+
+
+def _compute_hinge_transform(poly_a, a1, a2, p3_1, poly_b, verts_3d_b, edge_idx_b):
+    """Rigid 2D transform placing poly_b strictly outward from poly_a across hinge (a1, a2)."""
+    nb = len(verts_3d_b)
+    if _dist3d(p3_1, verts_3d_b[edge_idx_b]) < 1e-1:
+        b1, b2 = poly_b[edge_idx_b], poly_b[(edge_idx_b + 1) % nb]
+    else:
+        b1, b2 = poly_b[(edge_idx_b + 1) % nb], poly_b[edge_idx_b]
+
+    nx, ny = compute_outward_normal(poly_a, a1, a2)
+    da = (a2[0] - a1[0], a2[1] - a1[1])
+    la = max(1e-6, math.hypot(*da))
+    ux_a, uy_a = da[0] / la, da[1] / la
+
+    db = (b2[0] - b1[0], b2[1] - b1[1])
+    lb = max(1e-6, math.hypot(*db))
+    ux_b, uy_b = db[0] / lb, db[1] / lb
+    onx_b, ony_b = compute_outward_normal(poly_b, b1, b2)
+    inx_b, iny_b = -onx_b, -ony_b
+
+    def xform(p):
+        dx, dy = p[0] - b1[0], p[1] - b1[1]
+        u = dx * ux_b + dy * uy_b
+        v = dx * inx_b + dy * iny_b
+        return (a1[0] + u * ux_a + v * nx, a1[1] + u * uy_a + v * ny)
+    return xform
+
+
+def _trace_island_boundary(sub_faces, internal_keys):
+    """Traces the single ordered outer boundary loop of a tree-of-faces island."""
+    b_edges = []
+    for sf in sub_faces:
+        poly = sf['poly2d']
+        eks = sf['edge_keys']
+        emids = sf['edge_mids']
+        n = len(poly)
+        for ei in range(n):
+            ek = eks[ei]
+            if ek not in internal_keys:
+                b_edges.append({
+                    'p1': poly[ei],
+                    'p2': poly[(ei + 1) % n],
+                    'ek': ek,
+                    'emid': emids[ei]
+                })
+    if not b_edges:
+        return [], [], []
+
+    used = [False] * len(b_edges)
+    loop = [b_edges[0]]
+    used[0] = True
+    while len(loop) < len(b_edges):
+        prev = loop[-1]
+        px, py = prev['p2']
+        in_ang = math.atan2(prev['p2'][1] - prev['p1'][1], prev['p2'][0] - prev['p1'][0])
+        best_idx = None
+        best_turn = -1e9
+        for idx, cand in enumerate(b_edges):
+            if used[idx]:
+                continue
+            if math.hypot(cand['p1'][0] - px, cand['p1'][1] - py) < 0.05:
+                out_ang = math.atan2(cand['p2'][1] - cand['p1'][1], cand['p2'][0] - cand['p1'][0])
+                diff = (out_ang - (in_ang + math.pi)) % (2.0 * math.pi)
+                if diff > best_turn:
+                    best_turn = diff
+                    best_idx = idx
+        if best_idx is None:
+            break
+        loop.append(b_edges[best_idx])
+        used[best_idx] = True
+
+    return [e['p1'] for e in loop], [e['ek'] for e in loop], [e['emid'] for e in loop]
+
+
+def _unfold_model_joined(model, verts_mm, tex_img, flap_size_mm=5.5,
+                          page_w=215.9, page_h=279.4, margin=15.0):
+    """
+    Intelligent Flap-Aware Edge-Joining Solver:
+      1. Normalizes 3D face winding consistently outward per connected component.
+      2. Classifies exact 3D dihedral angles into mountain/valley folds.
+      3. Joins faces along shared edges (rings/strips first, then caps/bases) ONLY if:
+         - Zero face-to-face overlap in 2D
+         - Zero flap/circular gap collision (validates flaps on closure/external seams)
+         - Merged island fits within printable page bounds (margin >= 15 mm)
+      4. Assigns non-overlapping glue flaps (preferring clean corners, mitering if < 92°)
+         and bakes 300 DPI affine UV textures across every sub-face.
+    """
+    cx_m = sum(v[0] for v in verts_mm) / len(verts_mm)
+    cy_m = sum(v[1] for v in verts_mm) / len(verts_mm)
+    cz_m = sum(v[2] for v in verts_mm) / len(verts_mm)
+
+    raw_faces = [
+        {'v_idx': list(f['v']), 'uv_idx': list(f['vt']) if f.get('vt') else []}
+        for f in model.faces
+    ]
+
+    # Build initial edge adjacency and normalize outward winding per connected component
+    em_init = {}
+    for fi, rf in enumerate(raw_faces):
+        fv = [verts_mm[i] for i in rf['v_idx']]
+        n = len(fv)
+        for ei in range(n):
+            em_init.setdefault(make_3d_edge_key(fv[ei], fv[(ei + 1) % n]), []).append(fi)
+
+    visited = set()
+    for start_fi in range(len(raw_faces)):
+        if start_fi in visited:
+            continue
+        comp = []
+        q = [start_fi]
+        visited.add(start_fi)
+        while q:
+            c = q.pop(0)
+            comp.append(c)
+            fv = [verts_mm[i] for i in raw_faces[c]['v_idx']]
+            for ei in range(len(fv)):
+                ek = make_3d_edge_key(fv[ei], fv[(ei + 1) % len(fv)])
+                for nb in em_init[ek]:
+                    if nb not in visited:
+                        visited.add(nb)
+                        q.append(nb)
+
+        best_seed, best_abs, flip_seed = comp[0], -1.0, False
+        for c in comp:
+            fv = [verts_mm[i] for i in raw_faces[c]['v_idx']]
+            _, norm = project_face_to_2d(fv)
+            fc = (sum(v[0] for v in fv) / len(fv), sum(v[1] for v in fv) / len(fv), sum(v[2] for v in fv) / len(fv))
+            dot = (fc[0] - cx_m) * norm[0] + (fc[1] - cy_m) * norm[1] + (fc[2] - cz_m) * norm[2]
+            if abs(dot) > best_abs:
+                best_abs = abs(dot)
+                best_seed = c
+                flip_seed = (dot < 0)
+
+        if flip_seed:
+            raw_faces[best_seed]['v_idx'].reverse()
+            if raw_faces[best_seed]['uv_idx']:
+                raw_faces[best_seed]['uv_idx'].reverse()
+
+        comp_vis = {best_seed}
+        cq = [best_seed]
+        while cq:
+            curr = cq.pop(0)
+            cv = [verts_mm[i] for i in raw_faces[curr]['v_idx']]
+            for ei in range(len(cv)):
+                p1, p2 = cv[ei], cv[(ei + 1) % len(cv)]
+                ek = make_3d_edge_key(p1, p2)
+                for nb in em_init[ek]:
+                    if nb not in comp_vis:
+                        nv = [verts_mm[i] for i in raw_faces[nb]['v_idx']]
+                        for nei in range(len(nv)):
+                            if make_3d_edge_key(nv[nei], nv[(nei + 1) % len(nv)]) == ek:
+                                if _dist3d(p1, nv[nei]) < 1e-1:
+                                    raw_faces[nb]['v_idx'].reverse()
+                                    if raw_faces[nb]['uv_idx']:
+                                        raw_faces[nb]['uv_idx'].reverse()
+                                break
+                        comp_vis.add(nb)
+                        cq.append(nb)
+
+    face_data = []
+    for fi, rf in enumerate(raw_faces):
+        fv = [verts_mm[i] for i in rf['v_idx']]
+        poly2d, norm = project_face_to_2d(fv)
+        n_pts = len(fv)
+        eks = [make_3d_edge_key(fv[i], fv[(i + 1) % n_pts]) for i in range(n_pts)]
+        emids = [((fv[i][0] + fv[(i + 1) % n_pts][0]) * 0.5,
+                  (fv[i][1] + fv[(i + 1) % n_pts][1]) * 0.5,
+                  (fv[i][2] + fv[(i + 1) % n_pts][2]) * 0.5) for i in range(n_pts)]
+        fc = (sum(v[0] for v in fv) / n_pts, sum(v[1] for v in fv) / n_pts, sum(v[2] for v in fv) / n_pts)
+        uvs = [model.uvs[ui] for ui in rf['uv_idx']] if rf['uv_idx'] else []
+        face_data.append({
+            'fi': fi, 'verts_3d': fv, 'poly2d': poly2d,
+            'edge_keys': eks, 'edge_mids': emids, 'center_3d': fc,
+            'normal': norm, 'uvs': uvs
+        })
+
+    edge_map = {}
+    for fd in face_data:
+        for ei, ek in enumerate(fd['edge_keys']):
+            edge_map.setdefault(ek, []).append((fd['fi'], ei))
+
+    exact_seams = []
+    for ek, lst in edge_map.items():
+        if len(lst) == 2:
+            (fa, ea), (fb, eb) = lst
+            na, nb = face_data[fa]['normal'], face_data[fb]['normal']
+            ca, cb = face_data[fa]['center_3d'], face_data[fb]['center_3d']
+            d_ab = (cb[0] - ca[0], cb[1] - ca[1], cb[2] - ca[2])
+            s = na[0] * d_ab[0] + na[1] * d_ab[1] + na[2] * d_ab[2]
+            ftype = 'valley' if s > 1e-3 else 'mountain'
+            dihedral = math.acos(max(-1.0, min(1.0, na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2])))
+            p1 = face_data[fa]['poly2d'][ea]
+            p2 = face_data[fa]['poly2d'][(ea + 1) % len(face_data[fa]['poly2d'])]
+            elen = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+            same_deg = (len(face_data[fa]['verts_3d']) == len(face_data[fb]['verts_3d']))
+            exact_seams.append({
+                'ek': ek, 'fa': fa, 'ea': ea, 'fb': fb, 'eb': eb,
+                'ftype': ftype, 'dihedral': dihedral, 'elen': elen, 'same_deg': same_deg
+            })
+
+    # Prioritize continuous ring/strip joints before attaching bases/caps, then longer edges
+    exact_seams.sort(key=lambda s: (0 if s['same_deg'] else 1, -round(s['elen'], 1), round(s['dihedral'], 2)))
+
+    islands = {
+        fd['fi']: {'faces': {fd['fi']: fd['poly2d']}, 'internal_keys': {}}
+        for fd in face_data
+    }
+    parent = {fd['fi']: fd['fi'] for fd in face_data}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    max_w, max_h = page_w - 2.0 * margin, page_h - 2.0 * margin
+
+    for seam in exact_seams:
+        ra, rb = find(seam['fa']), find(seam['fb'])
+        if ra == rb:
+            continue
+        isl_a, isl_b = islands[ra], islands[rb]
+        poly_a = isl_a['faces'][seam['fa']]
+        poly_b = isl_b['faces'][seam['fb']]
+        ea, eb = seam['ea'], seam['eb']
+        a1, a2 = poly_a[ea], poly_a[(ea + 1) % len(poly_a)]
+        p3_1 = face_data[seam['fa']]['verts_3d'][ea]
+
+        xform = _compute_hinge_transform(poly_a, a1, a2, p3_1, poly_b, face_data[seam['fb']]['verts_3d'], eb)
+        trans_b = {fi: [xform(pt) for pt in p] for fi, p in isl_b['faces'].items()}
+
+        # Rule 1: Zero face-to-face overlap
+        if any(polys_strictly_overlap(pa, pb, tol=0.1) for pa in isl_a['faces'].values() for pb in trans_b.values()):
+            continue
+
+        merged_faces = dict(isl_a['faces'])
+        merged_faces.update(trans_b)
+        merged_ik = dict(isl_a['internal_keys'])
+        merged_ik.update(isl_b['internal_keys'])
+        merged_ik[seam['ek']] = seam['ftype']
+
+        # Rule 2: Circular closure & flap non-overlap check
+        seam_edges_in_m = {}
+        for fi, poly in merged_faces.items():
+            for ei in range(len(poly)):
+                ek = face_data[fi]['edge_keys'][ei]
+                if ek in merged_ik:
+                    continue
+                if len(edge_map.get(ek, [])) == 2:
+                    seam_edges_in_m.setdefault(ek, []).append((fi, ei, poly))
+
+        all_flaps_pts = []
+        placed_test_flaps = []
+        flap_blocked = False
+        for ek, sides in seam_edges_in_m.items():
+            can_place_one = False
+            for (fi_s, ei_s, poly_s) in sides:
+                p1, p2 = poly_s[ei_s], poly_s[(ei_s + 1) % len(poly_s)]
+                L = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                fp = generate_outward_flap(poly_s, p1, p2, depth=min(flap_size_mm, L * 0.45))
+                hits_face = any(polys_strictly_overlap(fp, fpoly, tol=0.1) for fpoly in merged_faces.values())
+                hits_flap = any(polys_strictly_overlap(fp, tfp, tol=0.1) for tfp in placed_test_flaps)
+                if not hits_face and not hits_flap:
+                    can_place_one = True
+                    placed_test_flaps.append(fp)
+                    all_flaps_pts.extend(fp)
+                    break
+            if len(sides) == 2 and not can_place_one:
+                flap_blocked = True
+                break
+        if flap_blocked:
+            continue
+
+        # Rule 3: Printable US Letter / A4 margin fit check over rotations
+        pts_total = [pt for p in merged_faces.values() for pt in p] + all_flaps_pts
+        fits_page = False
+        for ang in range(0, 180, 5):
+            rad = math.radians(ang)
+            ca, sa = math.cos(rad), math.sin(rad)
+            xs = [p[0] * ca - p[1] * sa for p in pts_total]
+            ys = [p[0] * sa + p[1] * ca for p in pts_total]
+            w, h = max(xs) - min(xs), max(ys) - min(ys)
+            if (w <= max_w and h <= max_h) or (h <= max_w and w <= max_h):
+                fits_page = True
+                break
+        if not fits_page:
+            continue
+
+        islands[ra] = {'faces': merged_faces, 'internal_keys': merged_ik}
+        del islands[rb]
+        parent[rb] = ra
+
+    # Convert merged islands into PaperParts
+    parts = []
+    for _, isl in islands.items():
+        pts_all = [pt for p in isl['faces'].values() for pt in p]
+        best_ang, best_score = 0, float('inf')
+        for ang in range(0, 180, 2):
+            rad = math.radians(ang)
+            ca, sa = math.cos(rad), math.sin(rad)
+            xs = [p[0] * ca - p[1] * sa for p in pts_all]
+            ys = [p[0] * sa + p[1] * ca for p in pts_all]
+            w, h = max(xs) - min(xs), max(ys) - min(ys)
+            sc = (w * h + (0 if h >= w else 500)) if (w <= max_w - 11.0 and h <= max_h - 11.0) else (1e9 + w * h)
+            if sc < best_score:
+                best_score = sc
+                best_ang = ang
+
+        rad = math.radians(best_ang)
+        ca, sa = math.cos(rad), math.sin(rad)
+        rot_faces = {fi: [(p[0] * ca - p[1] * sa, p[0] * sa + p[1] * ca) for p in poly]
+                     for fi, poly in isl['faces'].items()}
+
+        sub_faces = [
+            {
+                'fi': fi, 'poly2d': poly,
+                'edge_keys': face_data[fi]['edge_keys'],
+                'edge_mids': face_data[fi]['edge_mids'],
+                'uvs': face_data[fi]['uvs']
+            }
+            for fi, poly in rot_faces.items()
+        ]
+        outer_poly, outer_eks, outer_emids = _trace_island_boundary(sub_faces, isl['internal_keys'])
+
+        part = PaperPart(part_id=len(parts) + 1, name=f"Island {len(parts) + 1}")
+        part.poly2d = outer_poly
+        part.edge_3d_keys = outer_eks
+        part.edge_3d_mids = outer_emids
+        part.sub_faces = sub_faces
+        part._tex_img = tex_img
+
+        seen_ik = set()
+        for sf in sub_faces:
+            n = len(sf['poly2d'])
+            for ei in range(n):
+                ek = sf['edge_keys'][ei]
+                if ek in isl['internal_keys'] and ek not in seen_ik:
+                    seen_ik.add(ek)
+                    part.internal_folds.append(((sf['poly2d'][ei], sf['poly2d'][(ei + 1) % n]), isl['internal_keys'][ek]))
+
+        if tex_img is not None:
+            part.texture_crop = bake_island_texture(sub_faces, tex_img, dpi=300)
+        parts.append(part)
+
+    # Smart collision- & clutter-aware flap assignment on remaining external seams
+    edge_catalog = []
+    for p_idx, part in enumerate(parts):
+        n_edges = len(part.poly2d)
+        for e_idx in range(n_edges):
+            edge_catalog.append({
+                'part_idx': p_idx, 'edge_idx': e_idx,
+                'p1': part.poly2d[e_idx], 'p2': part.poly2d[(e_idx + 1) % n_edges],
+                'key_3d': part.edge_3d_keys[e_idx],
+                'mid_3d': part.edge_3d_mids[e_idx]
+            })
+
+    matched_edges = set()
+    seam_pairs = []
+    for i in range(len(edge_catalog)):
+        if i in matched_edges:
+            continue
+        for j in range(i + 1, len(edge_catalog)):
+            if j in matched_edges:
+                continue
+            if edge_catalog[i]['key_3d'] == edge_catalog[j]['key_3d']:
+                seam_pairs.append((i, j))
+                matched_edges.add(i)
+                matched_edges.add(j)
+                break
+
+    print(f"Edge-Joining Solver: {len(face_data)} faces -> {len(parts)} joined islands ({len(seam_pairs)} cut+glue seams).")
+
+    def _owning_subface_poly(part_obj, edge_obj):
+        p1, p2 = edge_obj['p1'], edge_obj['p2']
+        for sf in part_obj.sub_faces:
+            n = len(sf['poly2d'])
+            for ei in range(n):
+                if sf['edge_keys'][ei] == edge_obj['key_3d']:
+                    q1, q2 = sf['poly2d'][ei], sf['poly2d'][(ei + 1) % n]
+                    if (math.hypot(q1[0] - p1[0], q1[1] - p1[1]) < 0.1 and math.hypot(q2[0] - p2[0], q2[1] - p2[1]) < 0.1) or \
+                       (math.hypot(q1[0] - p2[0], q1[1] - p2[1]) < 0.1 and math.hypot(q2[0] - p1[0], q2[1] - p1[1]) < 0.1):
+                        return sf['poly2d']
+        return part_obj.poly2d
+
+    def _score_flap_side(part_obj, edge_obj):
+        p1, p2 = edge_obj['p1'], edge_obj['p2']
+        L = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        depth = min(flap_size_mm, L * 0.45)
+        sf_poly = _owning_subface_poly(part_obj, edge_obj)
+        fp = generate_outward_flap(sf_poly, p1, p2, depth=depth, taper_angle=45.0)
+        hits_face = any(polys_strictly_overlap(fp, sf['poly2d'], tol=0.05) for sf in part_obj.sub_faces)
+        hits_flap = any(polys_strictly_overlap(fp, t['poly'], tol=0.02) for t in part_obj.tabs)
+        tight_corner = any(_flaps_share_tight_corner(fp, (p1, p2), t['poly'], t['edge']) for t in part_obj.tabs)
+        # Lower penalty is better: 0 = completely free, 1 = tight corner (< 92°), 100 = overlap
+        penalty = (100 if hits_face or hits_flap else 0) + (5 if tight_corner else 0)
+        return penalty, fp
+
+    for seam_id, (idx_a, idx_b) in enumerate(seam_pairs, start=1):
+        ea, eb = edge_catalog[idx_a], edge_catalog[idx_b]
+        pa, pb = parts[ea['part_idx']], parts[eb['part_idx']]
+
+        pen_a, fp_a = _score_flap_side(pa, ea)
+        pen_b, fp_b = _score_flap_side(pb, eb)
+
+        if pen_a < pen_b:
+            use_a = True
+        elif pen_b < pen_a:
+            use_a = False
+        else:
+            use_a = (seam_id % 2 == 1)
+
+        if use_a:
+            tab_part, tab_edge, tab_fp = pa, ea, fp_a
+            clean_part, clean_edge = pb, eb
+        else:
+            tab_part, tab_edge, tab_fp = pb, eb, fp_b
+            clean_part, clean_edge = pa, ea
+
+        # Guarantee zero corner bevel collision if sharing a sharp corner
+        tab_fp = _miter_flap_against_tabs(tab_fp, (tab_edge['p1'], tab_edge['p2']), tab_part.tabs)
+        tab_part.tabs.append({'edge': (tab_edge['p1'], tab_edge['p2']), 'poly': tab_fp, 'id': seam_id})
+
+        cp1, cp2 = clean_edge['p1'], clean_edge['p2']
+        sf_c = _owning_subface_poly(clean_part, clean_edge)
+        nx, ny = compute_outward_normal(sf_c, cp1, cp2)
+        clean_part.edge_labels.append({
+            'pos': ((cp1[0] + cp2[0]) * 0.5 + 2.0 * nx, (cp1[1] + cp2[1]) * 0.5 + 2.0 * ny),
+            'id': seam_id
+        })
+
+    return parts
+
+
+def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5, texture_path=None,
+                          join_faces=False, paper_format="LETTER", margin=15.0):
     """
     Universal 3D Unroller:
       1. Automatically detects model scale (meters, cm, mm) if not specified.
       2. Projects each face to 2D preserving exact 3D lengths in millimeters.
-      3. Crops UV texture subimages for full-color photorealistic templates.
-      4. Matches shared seams across 3D coordinates (Pass 1: exact keys, Pass 2: proximity/overhangs).
-      5. Applies strict alternating outward glue tabs with configured flap size (mm) and 45° angle.
-      6. Places matching edge numbers 2.5mm outside cut outlines into scrap paper margins.
+      3. Crops UV texture subimages (or bakes multi-face affine textures when joining).
+      4. Optionally joins faces across shared edges into connected non-overlapping islands.
+      5. Applies alternating / collision-free outward glue tabs with configured flap size (mm).
     """
     if target_scale is None:
         target_scale = compute_auto_scale(model.vertices)
@@ -350,6 +1044,11 @@ def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5, texture_pa
             tex_img = Image.open(tex_candidate)
         except Exception as e:
             print(f"Notice: Could not load texture map ({e}).")
+
+    if join_faces:
+        pw, ph = (210.0, 297.0) if paper_format.upper() == "A4" else (215.9, 279.4)
+        return _unfold_model_joined(model, verts_mm, tex_img, flap_size_mm=flap_size_mm,
+                                    page_w=pw, page_h=ph, margin=margin)
 
     # 2. Project individual faces to 2D
     face_data = []
@@ -515,17 +1214,22 @@ def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5, texture_pa
 
 
 def rotate_part_geometry(part, angle_deg, rotate_texture=True):
-    """Rotates all geometry in part by angle_deg (0, 90, 180, 270)."""
-    if angle_deg == 0:
+    """Rotates all geometry in part by angle_deg (supports arbitrary degrees)."""
+    if angle_deg % 360 == 0:
         return
     rad = math.radians(angle_deg)
-    cos_a = round(math.cos(rad), 4)
-    sin_a = round(math.sin(rad), 4)
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+    if angle_deg % 90 == 0:
+        cos_a = round(cos_a, 4)
+        sin_a = round(sin_a, 4)
 
     def rot(pt):
         return (pt[0] * cos_a - pt[1] * sin_a, pt[0] * sin_a + pt[1] * cos_a)
 
     part.poly2d = [rot(pt) for pt in part.poly2d]
+    for sf in getattr(part, 'sub_faces', []):
+        sf['poly2d'] = [rot(pt) for pt in sf['poly2d']]
     for t in part.tabs:
         t['edge'] = (rot(t['edge'][0]), rot(t['edge'][1]))
         t['poly'] = [rot(pt) for pt in t['poly']]
@@ -533,7 +1237,10 @@ def rotate_part_geometry(part, angle_deg, rotate_texture=True):
         l['pos'] = rot(l['pos'])
     part.internal_folds = [((rot(f[0][0]), rot(f[0][1])), f[1]) for f in part.internal_folds]
     if rotate_texture and getattr(part, 'texture_crop', None) is not None:
-        part.texture_crop = part.texture_crop.rotate(-angle_deg, expand=True)
+        if angle_deg % 90 == 0:
+            part.texture_crop = part.texture_crop.rotate(-angle_deg, expand=True)
+        elif getattr(part, 'sub_faces', None) and getattr(part, '_tex_img', None) is not None:
+            part.texture_crop = bake_island_texture(part.sub_faces, part._tex_img, dpi=300)
 
 
 def get_part_outer_cut_polygon(part):
@@ -577,10 +1284,39 @@ def get_part_outer_cut_polygon(part):
 # 4. OPTIMAL BIN PACKING ONTO PAGES (US LETTER / A4) WITH ROTATION
 # =============================================================================
 
+def _part_collision_shapes(part):
+    """Returns physical convex polygons (sub-faces or poly2d + tabs + label boxes) with precomputed AABBs."""
+    polys = [sf['poly2d'] for sf in part.sub_faces] if getattr(part, 'sub_faces', None) else [part.poly2d]
+    for t in part.tabs:
+        polys.append(t['poly'])
+    for l in part.edge_labels:
+        lx, ly = l['pos']
+        polys.append([(lx - 1.2, ly - 1.2), (lx + 1.2, ly - 1.2), (lx + 1.2, ly + 1.2), (lx - 1.2, ly + 1.2)])
+    return [(p, (min(pt[0] for pt in p), min(pt[1] for pt in p), max(pt[0] for pt in p), max(pt[1] for pt in p)))
+            for p in polys]
+
+
+def _parts_clear(shapes_a, box_a, shapes_b, box_b, part_gap=5.0, exact=False):
+    if (box_a[2] + part_gap <= box_b[0] or box_a[0] >= box_b[2] + part_gap or
+            box_a[3] + part_gap <= box_b[1] or box_a[1] >= box_b[3] + part_gap):
+        return True
+    if not exact:
+        return False
+    for pa, ba in shapes_a:
+        for pb, bb in shapes_b:
+            if (ba[2] + part_gap <= bb[0] or ba[0] >= bb[2] + part_gap or
+                    ba[3] + part_gap <= bb[1] or ba[1] >= bb[3] + part_gap):
+                continue
+            if poly_min_dist(pa, pb) < part_gap:
+                return False
+    return True
+
+
 def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
     """
     Optimal 2D Bin Packing to minimize sheet count:
-      - Tests 4 orthogonal rotations (0°, 90°, 180°, 270°) to find tightest fit.
+      - Tests rotations (0°, 90°, 180°, 270°, plus 45° increments for curved multi-face islands).
+      - Uses polygon-level distance clearance for concave/curved islands to nest inside pockets.
       - Enforces strict >= 15.0 mm margin from all 4 page edges.
       - Enforces strict >= 5.0 mm clearance between all adjacent parts (including flaps/labels).
       - Reuses existing sheets first before allocating a new sheet.
@@ -591,7 +1327,6 @@ def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
     max_x_limit = page_w - margin
     max_y_limit = page_h - margin
 
-    # Sort parts by largest dimension descending (Best-Fit Decreasing)
     sorted_parts = sorted(
         parts,
         key=lambda p: max(p.compute_bounds()[2] - p.compute_bounds()[0],
@@ -599,96 +1334,106 @@ def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
         reverse=True
     )
 
-    sheets = []  # list of lists of (part, [min_x, min_y, max_x, max_y])
+    sheets = []  # list of lists of (part, [min_x, min_y, max_x, max_y], shapes)
 
     for part in sorted_parts:
+        is_island = bool(getattr(part, 'sub_faces', None))
+        rot_candidates = [0, 90, 180, 270, 45, 135, 225, 315] if is_island else [0, 90, 180, 270]
+        orig_snap = part.snapshot_geometry()
+
         best_sheet_idx = None
         best_pos = None
         best_rot = None
         best_score = float('inf')
 
-        # Test each rotation: 0°, 90°, 180°, 270°
-        for rot in [0, 90, 180, 270]:
+        for rot in rot_candidates:
+            part.restore_geometry(orig_snap)
             rotate_part_geometry(part, rot, rotate_texture=False)
             bx1, by1, bx2, by2 = part.compute_bounds()
             pw = bx2 - bx1
             ph = by2 - by1
 
-            # Check if fits within page margins
             if pw > (max_x_limit - min_x_limit) or ph > (max_y_limit - min_y_limit):
-                rotate_part_geometry(part, -rot, rotate_texture=False)
                 continue
 
-            # Check all existing open sheets
+            base_shapes = _part_collision_shapes(part) if is_island else None
+
             for s_idx, sheet in enumerate(sheets):
-                # Generate candidate anchor positions on this sheet
+                has_island_on_sheet = is_island or any(bool(getattr(op, 'sub_faces', None)) for op, _, _ in sheet)
+                cur_shapes = base_shapes if base_shapes is not None else (_part_collision_shapes(part) if has_island_on_sheet else None)
+
                 candidates = [(min_x_limit, min_y_limit)]
-                for _, pb in sheet:
-                    # To the right of placed part
+                for _, pb, _ in sheet:
                     candidates.append((pb[2] + part_gap, pb[1]))
                     candidates.append((pb[2] + part_gap, min_y_limit))
-                    # Above placed part
                     candidates.append((pb[0], pb[3] + part_gap))
                     candidates.append((min_x_limit, pb[3] + part_gap))
+
+                # Add concave pocket grid scan when nesting alongside curved multi-face islands
+                if has_island_on_sheet:
+                    gx_max = max_x_limit - pw
+                    gy_max = max_y_limit - ph
+                    gx = min_x_limit
+                    while gx <= gx_max + 0.01:
+                        gy = min_y_limit
+                        while gy <= gy_max + 0.01:
+                            candidates.append((gx, gy))
+                            gy += 8.0
+                        gx += 8.0
 
                 for cx, cy in candidates:
                     target_x2 = cx + pw
                     target_y2 = cy + ph
-
                     if target_x2 > max_x_limit or target_y2 > max_y_limit:
                         continue
 
-                    # Check strict >= 5.0 mm collision clearance with all placed parts
+                    dx_c, dy_c = cx - bx1, cy - by1
+                    cand_box = (cx, cy, target_x2, target_y2)
+                    cand_shapes = (
+                        [([(pt[0] + dx_c, pt[1] + dy_c) for pt in p],
+                          (b[0] + dx_c, b[1] + dy_c, b[2] + dx_c, b[3] + dy_c))
+                         for p, b in cur_shapes]
+                        if has_island_on_sheet else None
+                    )
+
                     collides = False
-                    for _, pb in sheet:
-                        if not (target_x2 + part_gap <= pb[0] or
-                                cx >= pb[2] + part_gap or
-                                target_y2 + part_gap <= pb[1] or
-                                cy >= pb[3] + part_gap):
+                    for _, pb, p_shapes in sheet:
+                        if not _parts_clear(cand_shapes, cand_box, p_shapes, pb, part_gap=part_gap, exact=has_island_on_sheet):
                             collides = True
                             break
 
                     if not collides:
-                        # Score: lower sheet index first (pack existing), then lowest y2 and x2
-                        score = s_idx * 1000000 + target_y2 * 1000 + target_x2
+                        score = s_idx * 1000000 + target_y2 * 1000 + target_x2 + (100 if rot % 90 != 0 else 0)
                         if score < best_score:
                             best_score = score
                             best_sheet_idx = s_idx
                             best_pos = (cx, cy)
                             best_rot = rot
 
-            rotate_part_geometry(part, -rot, rotate_texture=False)
+        part.restore_geometry(orig_snap)
 
         if best_sheet_idx is not None:
-            # Place on best existing sheet
             rotate_part_geometry(part, best_rot, rotate_texture=True)
             bx1, by1, bx2, by2 = part.compute_bounds()
-            dx = best_pos[0] - bx1
-            dy = best_pos[1] - by1
-            part.translate(dx, dy)
+            part.translate(best_pos[0] - bx1, best_pos[1] - by1)
             final_box = part.compute_bounds()
-            sheets[best_sheet_idx].append((part, final_box))
+            sheets[best_sheet_idx].append((part, final_box, _part_collision_shapes(part)))
         else:
-            # Open a new sheet
             best_rot = 0
-            for rot in [0, 90, 180, 270]:
+            for rot in rot_candidates:
+                part.restore_geometry(orig_snap)
                 rotate_part_geometry(part, rot, rotate_texture=False)
                 bx1, by1, bx2, by2 = part.compute_bounds()
-                pw = bx2 - bx1
-                ph = by2 - by1
-                if pw <= (max_x_limit - min_x_limit) and ph <= (max_y_limit - min_y_limit):
+                if (bx2 - bx1) <= (max_x_limit - min_x_limit) and (by2 - by1) <= (max_y_limit - min_y_limit):
                     best_rot = rot
-                    rotate_part_geometry(part, -rot, rotate_texture=False)
                     break
-                rotate_part_geometry(part, -rot, rotate_texture=False)
 
+            part.restore_geometry(orig_snap)
             rotate_part_geometry(part, best_rot, rotate_texture=True)
             bx1, by1, bx2, by2 = part.compute_bounds()
-            dx = min_x_limit - bx1
-            dy = min_y_limit - by1
-            part.translate(dx, dy)
+            part.translate(min_x_limit - bx1, min_y_limit - by1)
             final_box = part.compute_bounds()
-            sheets.append([(part, final_box)])
+            sheets.append([(part, final_box, _part_collision_shapes(part))])
 
     return [[item[0] for item in sheet] for sheet in sheets]
 
@@ -1006,7 +1751,7 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
 # =============================================================================
 
 def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
-                 paper_format="LETTER", flap_size_mm=5.5, user_scale=None):
+                 paper_format="LETTER", flap_size_mm=5.5, user_scale=None, join_faces=False):
     """Executes the complete universal 3D papercraft pipeline."""
     if paper_format.upper() == "A4":
         page_w = 210.0
@@ -1027,8 +1772,11 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
     scale = compute_auto_scale(model.vertices, user_scale=user_scale)
 
     # 3. Unfold to 2D Planar Parts with specified flap size
-    print(f"Unfolding 3D mesh into 2D planar papercraft parts (Flap size: {flap_size_mm:.1f} mm, Scale: {scale:.1f}x)...")
-    parts = unfold_model_to_parts(model, target_scale=scale, flap_size_mm=flap_size_mm, texture_path=texture_path)
+    print(f"Unfolding 3D mesh into 2D planar papercraft parts (Flap size: {flap_size_mm:.1f} mm, Scale: {scale:.1f}x, Join edges: {join_faces})...")
+    parts = unfold_model_to_parts(
+        model, target_scale=scale, flap_size_mm=flap_size_mm, texture_path=texture_path,
+        join_faces=join_faces, paper_format=paper_format, margin=15.0
+    )
     print(f"Unfolded into {len(parts)} papercraft parts.")
 
     # 4. Bin Pack onto Pages
@@ -1084,6 +1832,8 @@ if __name__ == "__main__":
                         choices=["LETTER", "A4"], help="Paper format (LETTER or A4)")
     parser.add_argument("--flap-size", "-s", type=float, default=5.5,
                         help="Depth/size of glue flaps in millimeters (default: 5.5 mm)")
+    parser.add_argument("--join-edges", action="store_true",
+                        help="Intelligently join faces across shared edges into connected non-overlapping islands")
 
     args = parser.parse_args()
     run_pipeline(
@@ -1092,5 +1842,6 @@ if __name__ == "__main__":
         outdir=args.outdir,
         paper_format=args.format,
         flap_size_mm=args.flap_size,
-        user_scale=args.scale
+        user_scale=args.scale,
+        join_faces=args.join_edges
     )

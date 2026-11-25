@@ -139,13 +139,24 @@ HTML_PAGE = r"""<!DOCTYPE html>
           </select>
         </div>
 
+        <!-- Edge Joining Toggle -->
+        <div class="pt-2 border-t border-slate-100 flex items-start space-x-2.5">
+          <input type="checkbox" id="join-edges" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+          <div>
+            <label for="join-edges" class="text-xs font-semibold text-slate-700 cursor-pointer">
+              Smart Edge Joining (Minimize Cutting &amp; Gluing)
+            </label>
+            <p class="text-[11px] text-slate-400">Joins faces across fold lines while preventing circular/flap overlaps and respecting page margins.</p>
+          </div>
+        </div>
+
         <!-- Topology Scope & Roadmap Tip -->
         <div class="p-2.5 bg-amber-50 border border-amber-200/70 rounded-lg text-[11px] text-amber-800 space-y-0.5">
           <p class="font-semibold flex items-center gap-1">
-            <span>💡 Current Scope &amp; Roadmap:</span>
+            <span>💡 Topology &amp; Edge Joining:</span>
           </p>
           <p class="text-amber-700 leading-normal">
-            Highly efficient for low-poly models with grouped polygons. Individual planar faces unfold with alternating glue tabs. Interactive edge joining and seam splitting will be introduced in future updates.
+            Supports both individual planar unfolding and automated flap-aware edge joining (conical fans, strips, and nested concave islands) with exact 1:1 millimeter scale preservation.
           </p>
         </div>
 
@@ -379,7 +390,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
         flap_size_mm: parseFloat(flapSlider.value),
         paper_format: document.getElementById('paper-format').value,
         page_margin: parseFloat(document.getElementById('page-margin').value),
-        variation: document.getElementById('variation-select').value
+        variation: document.getElementById('variation-select').value,
+        join_faces: document.getElementById('join-edges').checked
       };
 
       try {
@@ -526,7 +538,11 @@ class PapercraftWebHandler(BaseHTTPRequestHandler):
                     except (ValueError, TypeError):
                         user_scale = None
 
-                parts = unfold_model_to_parts(model, target_scale=user_scale, flap_size_mm=flap_size_mm)
+                join_faces = bool(data.get("join_faces", False))
+                parts = unfold_model_to_parts(
+                    model, target_scale=user_scale, flap_size_mm=flap_size_mm,
+                    join_faces=join_faces, paper_format=paper_format, margin=margin_mm
+                )
                 pages = pack_parts_onto_pages(parts, page_w, page_h, margin=margin_mm, part_gap=5.0)
 
                 out_temp = os.path.join(tempfile.gettempdir(), "pepakura_web_exports")
