@@ -1443,7 +1443,7 @@ def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
 # =============================================================================
 
 def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
-                    variation=1):
+                    variation=1, footer_text=None):
     """Generates precision vector SVG for cutting plotters and manual craft."""
     svg = []
     svg.append('<?xml version="1.0" encoding="UTF-8"?>')
@@ -1546,13 +1546,21 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
                 svg.append(f'    <text x="{lx:.2f}" y="{ly:.2f}" fill="#222222">{l["id"]}</text>')
         svg.append('  </g>')
 
+    # Optional centered bottom margin footer (inside 15mm bottom margin)
+    if footer_text:
+        import html
+        safe_footer = html.escape(str(footer_text))
+        svg.append('  <!-- FOOTER BRANDING -->')
+        svg.append(f'  <text x="{page_w * 0.5:.2f}" y="{page_h - 5.0:.2f}" font-family="Helvetica, Arial, sans-serif" '
+                   f'font-weight="bold" font-size="4.94" text-anchor="middle" fill="#111111">{safe_footer}</text>')
+
     svg.append('</svg>')
 
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write("\n".join(svg))
 
 
-def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
+def export_pdf_pages(pages, page_w, page_h, filepath, variation=1, footer_text=None):
     """Generates multi-page vector PDF in exact mm coordinates."""
     c = canvas.Canvas(filepath, pagesize=(page_w * MM_TO_PT, page_h * MM_TO_PT))
     total_pages = len(pages)
@@ -1723,6 +1731,12 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
                     lx, ly = l['pos']
                     c.drawCentredString(lx * MM_TO_PT, (page_h - ly) * MM_TO_PT - 2.0, str(l['id']))
 
+        # Optional centered bottom margin footer (Bold 14 pt inside 15mm bottom margin)
+        if footer_text:
+            c.setFillColor(colors.HexColor('#111111'))
+            c.setFont("Helvetica-Bold", 14)
+            c.drawCentredString((page_w * 0.5) * MM_TO_PT, 5.0 * MM_TO_PT, str(footer_text))
+
         c.showPage()
 
     c.save()
@@ -1751,7 +1765,8 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
 # =============================================================================
 
 def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
-                 paper_format="LETTER", flap_size_mm=5.5, user_scale=None, join_faces=False):
+                 paper_format="LETTER", flap_size_mm=5.5, user_scale=None,
+                 join_faces=False, footer_text=None):
     """Executes the complete universal 3D papercraft pipeline."""
     if paper_format.upper() == "A4":
         page_w = 210.0
@@ -1801,13 +1816,14 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
 
         # PDF Export
         pdf_path = os.path.join(var_dir, f"papercraft_template_{var_dir_name}.pdf")
-        export_pdf_pages(pages, page_w, page_h, pdf_path, variation=var_id)
+        export_pdf_pages(pages, page_w, page_h, pdf_path, variation=var_id, footer_text=footer_text)
         print(f"  -> Generated Vector PDF: {pdf_path}")
 
         # SVG Export
         for p_idx, page_parts in enumerate(pages):
             svg_path = os.path.join(var_dir, f"papercraft_template_page{p_idx + 1}.svg")
-            export_svg_page(page_parts, p_idx + 1, total_pages, page_w, page_h, svg_path, variation=var_id)
+            export_svg_page(page_parts, p_idx + 1, total_pages, page_w, page_h, svg_path,
+                            variation=var_id, footer_text=footer_text)
             print(f"  -> Generated Vector SVG (Page {p_idx + 1}): {svg_path}")
 
         # 300 DPI PNG Export
@@ -1834,6 +1850,8 @@ if __name__ == "__main__":
                         help="Depth/size of glue flaps in millimeters (default: 5.5 mm)")
     parser.add_argument("--join-edges", action="store_true",
                         help="Intelligently join faces across shared edges into connected non-overlapping islands")
+    parser.add_argument("--footer", type=str, default=None,
+                        help="Optional centered bold 14pt footer text inside the bottom 15mm margin")
 
     args = parser.parse_args()
     run_pipeline(
@@ -1843,5 +1861,6 @@ if __name__ == "__main__":
         paper_format=args.format,
         flap_size_mm=args.flap_size,
         user_scale=args.scale,
-        join_faces=args.join_edges
+        join_faces=args.join_edges,
+        footer_text=args.footer
     )

@@ -140,6 +140,7 @@ python pepakura_alternative_workflow.py --input "my_model.obj" --join-edges
 * `--outdir`, `-o`: Output directory for generated deliverables (default: `exports`).
 * `--scale`: Optional manual scale override (default: auto-detected from meters/cm/mm).
 * `--join-edges`: Intelligently join faces along shared fold edges (with circular/conical flap-overlap prevention, margin checking, and concave nesting) to minimize cutting and gluing.
+* `--footer`: Optional centered bold 14pt footer text placed cleanly inside the bottom $15.0\text{ mm}$ sheet margin.
 
 ---
 
