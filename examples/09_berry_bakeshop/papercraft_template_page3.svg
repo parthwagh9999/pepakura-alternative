@@ -51,4 +51,6 @@
     <text x="190.32" y="82.72" fill="#222222">2</text>
     <text x="13.00" y="82.72" fill="#222222">4</text>
   </g>
+  <!-- FOOTER BRANDING -->
+  <text x="107.95" y="274.40" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="4.94" text-anchor="middle" fill="#111111">The Fine Exchange</text>
 </svg>

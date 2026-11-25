@@ -336,11 +336,17 @@ def project_face_to_2d(verts_3d):
     )
 
     poly2d = []
+    # If face is oriented vertically in 3D (v_axis has positive 3D Y),
+    # rotate 180° in 2D so roof/top points towards top of paper sheet (smaller 2D Y).
+    flip_upright = (v_axis[1] > 0.05)
     for v in verts_3d:
         rel = (v[0] - v0[0], v[1] - v0[1], v[2] - v0[2])
         pu = rel[0] * u_axis[0] + rel[1] * u_axis[1] + rel[2] * u_axis[2]
         pv = rel[0] * v_axis[0] + rel[1] * v_axis[1] + rel[2] * v_axis[2]
-        poly2d.append((pu, pv))
+        if flip_upright:
+            poly2d.append((-pu, -pv))
+        else:
+            poly2d.append((pu, pv))
 
     return poly2d, norm
 
@@ -1083,27 +1089,22 @@ def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5, texture_pa
         p.edge_3d_keys = list(fd['edge_keys'])
         p.edge_3d_mids = list(fd['edge_mids'])
 
-        # Crop UV texture if available
+        # Affine UV texture baking for each individual face (proper perspective-correct mapping)
         if tex_img is not None and fd['face_idx'] < len(model.faces):
             f_obj = model.faces[fd['face_idx']]
             if f_obj.get('vt'):
-                W, H = tex_img.size
                 uvs = [model.uvs[uvi] for uvi in f_obj['vt'] if uvi < len(model.uvs)]
-                if uvs:
-                    us = [uv[0] for uv in uvs]
-                    vs = [uv[1] for uv in uvs]
-                    x1 = max(0, min(W - 1, int(min(us) * W)))
-                    x2 = max(x1 + 1, min(W, int(max(us) * W)))
-                    y1 = max(0, min(H - 1, int((1.0 - max(vs)) * H)))
-                    y2 = max(y1 + 1, min(H, int((1.0 - min(vs)) * H)))
-                    crop = tex_img.crop((x1, y1, x2, y2))
-
-                    poly_w = max(pt[0] for pt in p.poly2d) - min(pt[0] for pt in p.poly2d)
-                    poly_h = max(pt[1] for pt in p.poly2d) - min(pt[1] for pt in p.poly2d)
-                    crop_w, crop_h = crop.size
-                    if (poly_w > poly_h and crop_w < crop_h) or (poly_w < poly_h and crop_w > crop_h):
-                        crop = crop.rotate(90, expand=True)
-                    p.texture_crop = crop
+                if len(uvs) >= len(p.poly2d):
+                    # Build a single-face sub_faces entry for affine baking
+                    sf_entry = {
+                        'poly2d': list(p.poly2d),
+                        'uvs': uvs,
+                        'edge_keys': list(fd['edge_keys']),
+                        'edge_mids': list(fd['edge_mids'])
+                    }
+                    p.sub_faces = [sf_entry]
+                    p._tex_img = tex_img
+                    p.texture_crop = bake_island_texture([sf_entry], tex_img, dpi=300)
 
         parts.append(p)
 
@@ -1237,10 +1238,11 @@ def rotate_part_geometry(part, angle_deg, rotate_texture=True):
         l['pos'] = rot(l['pos'])
     part.internal_folds = [((rot(f[0][0]), rot(f[0][1])), f[1]) for f in part.internal_folds]
     if rotate_texture and getattr(part, 'texture_crop', None) is not None:
-        if angle_deg % 90 == 0:
-            part.texture_crop = part.texture_crop.rotate(-angle_deg, expand=True)
-        elif getattr(part, 'sub_faces', None) and getattr(part, '_tex_img', None) is not None:
+        if getattr(part, 'sub_faces', None) and getattr(part, '_tex_img', None) is not None:
+            # Always rebake from rotated sub_faces for pixel-perfect accuracy
             part.texture_crop = bake_island_texture(part.sub_faces, part._tex_img, dpi=300)
+        elif angle_deg % 90 == 0:
+            part.texture_crop = part.texture_crop.rotate(-angle_deg, expand=True)
 
 
 def get_part_outer_cut_polygon(part):
@@ -1766,7 +1768,7 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
 
 def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
                  paper_format="LETTER", flap_size_mm=5.5, user_scale=None,
-                 join_faces=False, footer_text=None):
+                 join_faces=False, footer_text="The Fine Exchange"):
     """Executes the complete universal 3D papercraft pipeline."""
     if paper_format.upper() == "A4":
         page_w = 210.0
@@ -1797,6 +1799,12 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
     # 4. Bin Pack onto Pages
     pages = pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0)
     print(f"Packed into {len(pages)} sheet(s) [Format: {paper_format}, Margins: >= 15mm, Gaps: >= 5mm, Flaps: {flap_size_mm}mm].")
+
+    # 4B. Re-bake all textures on final packed and rotated geometry for 100% vertex-accurate affine alignment
+    for sheet in pages:
+        for part in sheet:
+            if getattr(part, '_tex_img', None) is not None and getattr(part, 'sub_faces', None):
+                part.texture_crop = bake_island_texture(part.sub_faces, part._tex_img, dpi=300)
 
     # 5. Generate All 4 Variations
     variations = [
@@ -1850,7 +1858,7 @@ if __name__ == "__main__":
                         help="Depth/size of glue flaps in millimeters (default: 5.5 mm)")
     parser.add_argument("--join-edges", action="store_true",
                         help="Intelligently join faces across shared edges into connected non-overlapping islands")
-    parser.add_argument("--footer", type=str, default=None,
+    parser.add_argument("--footer", type=str, default="The Fine Exchange",
                         help="Optional centered bold 14pt footer text inside the bottom 15mm margin")
 
     args = parser.parse_args()

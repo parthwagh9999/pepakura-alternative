@@ -26,27 +26,29 @@
   </g>
   <!-- PART FACETS -->
   <g id="FACETS" fill="#FBF9F5" stroke="none">
-    <polygon points="15.00,20.50 147.87,20.50 147.87,162.44 15.00,162.44"/>
+    <polygon points="147.87,162.44 15.00,162.44 15.00,20.50 147.87,20.50"/>
   </g>
   <!-- GLUE TABS (OUTWARD 45° WITH CROSS-HATCH PATTERN) -->
   <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="none">
-    <polygon points="147.87,162.44 142.37,167.94 20.50,167.94 15.00,162.44"/>
     <polygon points="15.00,20.50 20.50,15.00 142.37,15.00 147.87,20.50"/>
+    <polygon points="147.87,162.44 142.37,167.94 20.50,167.94 15.00,162.44"/>
   </g>
   <!-- INTERNAL CREASE LINES -->
   <g id="FOLD_LINES">
-    <line x1="147.87" y1="162.44" x2="15.00" y2="162.44" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
     <line x1="15.00" y1="20.50" x2="147.87" y2="20.50" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="147.87" y1="162.44" x2="15.00" y2="162.44" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
   </g>
   <!-- CUT OUTLINES -->
   <g id="CUT_LINES" fill="none" stroke="#000000" stroke-width="0.4">
-    <polygon points="15.00,20.50 20.50,15.00 142.37,15.00 147.87,20.50 147.87,162.44 142.37,167.94 20.50,167.94 15.00,162.44"/>
+    <polygon points="147.87,162.44 142.37,167.94 20.50,167.94 15.00,162.44 15.00,20.50 20.50,15.00 142.37,15.00 147.87,20.50"/>
   </g>
   <!-- EDGE ID NUMBERS (PROTECTED BADGE ON TABS, EXTERIOR IN SCRAP MARGIN) -->
   <g id="EDGE_IDS" font-family="Helvetica, Arial, sans-serif" font-size="2.2" font-weight="bold" text-anchor="middle" dominant-baseline="central">
-    <circle cx="81.43" cy="165.19" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
-    <text x="81.43" y="165.19" fill="#111111">9</text>
     <circle cx="81.43" cy="17.75" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
-    <text x="81.43" y="17.75" fill="#111111">10</text>
+    <text x="81.43" y="17.75" fill="#111111">9</text>
+    <circle cx="81.43" cy="165.19" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="81.43" y="165.19" fill="#111111">10</text>
   </g>
+  <!-- FOOTER BRANDING -->
+  <text x="107.95" y="274.40" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="4.94" text-anchor="middle" fill="#111111">The Fine Exchange</text>
 </svg>

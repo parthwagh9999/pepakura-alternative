@@ -26,32 +26,34 @@
   </g>
   <!-- PART FACETS -->
   <g id="FACETS" fill="#FBF9F5" stroke="none">
-    <polygon points="15.00,20.50 136.20,20.50 136.20,141.70 15.00,141.70"/>
+    <polygon points="141.70,141.70 20.50,141.70 20.50,20.50 141.70,20.50"/>
   </g>
   <!-- GLUE TABS (OUTWARD 45° WITH CROSS-HATCH PATTERN) -->
   <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="none">
-    <polygon points="15.00,20.50 20.50,15.00 130.70,15.00 136.20,20.50"/>
-    <polygon points="136.20,20.50 141.70,26.00 141.70,136.20 136.20,141.70"/>
-    <polygon points="136.20,141.70 130.70,147.20 20.50,147.20 15.00,141.70"/>
+    <polygon points="141.70,141.70 136.20,147.20 26.00,147.20 20.50,141.70"/>
+    <polygon points="20.50,141.70 15.00,136.20 15.00,26.00 20.50,20.50"/>
+    <polygon points="20.50,20.50 26.00,15.00 136.20,15.00 141.70,20.50"/>
   </g>
   <!-- INTERNAL CREASE LINES -->
   <g id="FOLD_LINES">
-    <line x1="15.00" y1="20.50" x2="136.20" y2="20.50" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
-    <line x1="136.20" y1="20.50" x2="136.20" y2="141.70" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
-    <line x1="136.20" y1="141.70" x2="15.00" y2="141.70" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="141.70" y1="141.70" x2="20.50" y2="141.70" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="20.50" y1="141.70" x2="20.50" y2="20.50" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="20.50" y1="20.50" x2="141.70" y2="20.50" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
   </g>
   <!-- CUT OUTLINES -->
   <g id="CUT_LINES" fill="none" stroke="#000000" stroke-width="0.4">
-    <polygon points="15.00,20.50 20.50,15.00 130.70,15.00 136.20,20.50 141.70,26.00 141.70,136.20 136.20,141.70 130.70,147.20 20.50,147.20 15.00,141.70"/>
+    <polygon points="141.70,141.70 136.20,147.20 26.00,147.20 20.50,141.70 15.00,136.20 15.00,26.00 20.50,20.50 26.00,15.00 136.20,15.00 141.70,20.50"/>
   </g>
   <!-- EDGE ID NUMBERS (PROTECTED BADGE ON TABS, EXTERIOR IN SCRAP MARGIN) -->
   <g id="EDGE_IDS" font-family="Helvetica, Arial, sans-serif" font-size="2.2" font-weight="bold" text-anchor="middle" dominant-baseline="central">
-    <circle cx="75.60" cy="17.75" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
-    <text x="75.60" y="17.75" fill="#111111">2</text>
-    <circle cx="138.95" cy="81.10" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
-    <text x="138.95" y="81.10" fill="#111111">8</text>
-    <circle cx="75.60" cy="144.45" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
-    <text x="75.60" y="144.45" fill="#111111">21</text>
-    <text x="13.00" y="81.10" fill="#222222">5</text>
+    <circle cx="81.10" cy="144.45" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="81.10" y="144.45" fill="#111111">2</text>
+    <circle cx="17.75" cy="81.10" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="17.75" y="81.10" fill="#111111">8</text>
+    <circle cx="81.10" cy="17.75" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="81.10" y="17.75" fill="#111111">21</text>
+    <text x="143.70" y="81.10" fill="#222222">5</text>
   </g>
+  <!-- FOOTER BRANDING -->
+  <text x="107.95" y="274.40" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="4.94" text-anchor="middle" fill="#111111">The Fine Exchange</text>
 </svg>

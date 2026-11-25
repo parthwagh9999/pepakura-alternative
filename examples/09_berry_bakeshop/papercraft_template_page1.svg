@@ -26,25 +26,27 @@
   </g>
   <!-- PART FACETS -->
   <g id="FACETS" fill="#FBF9F5" stroke="none">
-    <polygon points="15.00,15.00 188.32,15.00 188.32,157.21 101.66,263.86 15.00,157.21"/>
+    <polygon points="193.82,263.86 20.50,263.86 20.50,121.66 107.16,15.00 193.82,121.66"/>
   </g>
   <!-- GLUE TABS (OUTWARD 45° WITH CROSS-HATCH PATTERN) -->
   <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="none">
-    <polygon points="188.32,15.00 193.82,20.50 193.82,151.71 188.32,157.21"/>
+    <polygon points="20.50,263.86 15.00,258.36 15.00,127.16 20.50,121.66"/>
   </g>
   <!-- INTERNAL CREASE LINES -->
   <g id="FOLD_LINES">
-    <line x1="188.32" y1="15.00" x2="188.32" y2="157.21" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
+    <line x1="20.50" y1="263.86" x2="20.50" y2="121.66" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>
   </g>
   <!-- CUT OUTLINES -->
   <g id="CUT_LINES" fill="none" stroke="#000000" stroke-width="0.4">
-    <polygon points="15.00,15.00 188.32,15.00 193.82,20.50 193.82,151.71 188.32,157.21 101.66,263.86 15.00,157.21"/>
+    <polygon points="193.82,263.86 20.50,263.86 15.00,258.36 15.00,127.16 20.50,121.66 107.16,15.00 193.82,121.66"/>
   </g>
   <!-- EDGE ID NUMBERS (PROTECTED BADGE ON TABS, EXTERIOR IN SCRAP MARGIN) -->
   <g id="EDGE_IDS" font-family="Helvetica, Arial, sans-serif" font-size="2.2" font-weight="bold" text-anchor="middle" dominant-baseline="central">
-    <circle cx="191.07" cy="86.10" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
-    <text x="191.07" y="86.10" fill="#111111">5</text>
-    <text x="101.66" y="13.00" fill="#222222">3</text>
-    <text x="13.00" y="86.10" fill="#222222">6</text>
+    <circle cx="17.75" cy="192.76" r="2.2" fill="#E6E6E6" stroke="#999999" stroke-width="0.2"/>
+    <text x="17.75" y="192.76" fill="#111111">5</text>
+    <text x="107.16" y="265.86" fill="#222222">3</text>
+    <text x="195.82" y="192.76" fill="#222222">6</text>
   </g>
+  <!-- FOOTER BRANDING -->
+  <text x="107.95" y="274.40" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="4.94" text-anchor="middle" fill="#111111">The Fine Exchange</text>
 </svg>
