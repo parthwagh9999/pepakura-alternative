@@ -30,7 +30,9 @@ Accepts ANY 3D model (.obj) and produces production-grade vector templates:
 import os
 import sys
 import math
+import base64
 import argparse
+from io import BytesIO
 from PIL import Image
 
 from reportlab.pdfgen import canvas
@@ -184,13 +186,21 @@ class PaperPart:
         self.internal_folds = []     # [ ((p1, p2), 'mountain' | 'valley'), ... ]
         self.tabs = []               # [ {'edge': (p1, p2), 'poly': [...], 'id': int}, ... ]
         self.edge_labels = []        # [ {'pos': (x,y), 'id': int}, ... ]
+        self.texture_crop = None     # PIL Image or None
+
+    def compute_poly_bounds(self):
+        if not self.poly2d:
+            return 0, 0, 0, 0
+        min_x = min(p[0] for p in self.poly2d)
+        max_x = max(p[0] for p in self.poly2d)
+        min_y = min(p[1] for p in self.poly2d)
+        max_y = max(p[1] for p in self.poly2d)
+        return min_x, min_y, max_x, max_y
 
     def compute_bounds(self):
         pts = list(self.poly2d)
         for t in self.tabs:
             pts.extend(t['poly'])
-        for l in self.edge_labels:
-            pts.append(l['pos'])
         if not pts:
             return 0, 0, 0, 0
         min_x = min(p[0] for p in pts)
@@ -316,20 +326,30 @@ def project_face_to_2d(verts_3d):
     return poly2d, norm
 
 
-def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5):
+def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5, texture_path=None):
     """
     Universal 3D Unroller:
       1. Automatically detects model scale (meters, cm, mm) if not specified.
       2. Projects each face to 2D preserving exact 3D lengths in millimeters.
-      3. Matches shared seams across 3D coordinates (Pass 1: exact keys, Pass 2: proximity/overhangs).
-      4. Applies strict alternating outward glue tabs with configured flap size (mm) and 45° angle.
-      5. Places matching edge numbers 2.5mm outside cut outlines into scrap paper margins.
+      3. Crops UV texture subimages for full-color photorealistic templates.
+      4. Matches shared seams across 3D coordinates (Pass 1: exact keys, Pass 2: proximity/overhangs).
+      5. Applies strict alternating outward glue tabs with configured flap size (mm) and 45° angle.
+      6. Places matching edge numbers 2.5mm outside cut outlines into scrap paper margins.
     """
     if target_scale is None:
         target_scale = compute_auto_scale(model.vertices)
 
     # 1. Scale 3D vertices to real-world millimeters
     verts_mm = [(v[0] * target_scale, v[1] * target_scale, v[2] * target_scale) for v in model.vertices]
+
+    # Resolve texture image
+    tex_img = None
+    tex_candidate = texture_path or getattr(model, 'texture_file', None)
+    if tex_candidate and os.path.exists(tex_candidate):
+        try:
+            tex_img = Image.open(tex_candidate)
+        except Exception as e:
+            print(f"Notice: Could not load texture map ({e}).")
 
     # 2. Project individual faces to 2D
     face_data = []
@@ -363,6 +383,29 @@ def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5):
         p.poly2d = list(fd['poly2d'])
         p.edge_3d_keys = list(fd['edge_keys'])
         p.edge_3d_mids = list(fd['edge_mids'])
+
+        # Crop UV texture if available
+        if tex_img is not None and fd['face_idx'] < len(model.faces):
+            f_obj = model.faces[fd['face_idx']]
+            if f_obj.get('vt'):
+                W, H = tex_img.size
+                uvs = [model.uvs[uvi] for uvi in f_obj['vt'] if uvi < len(model.uvs)]
+                if uvs:
+                    us = [uv[0] for uv in uvs]
+                    vs = [uv[1] for uv in uvs]
+                    x1 = max(0, min(W - 1, int(min(us) * W)))
+                    x2 = max(x1 + 1, min(W, int(max(us) * W)))
+                    y1 = max(0, min(H - 1, int((1.0 - max(vs)) * H)))
+                    y2 = max(y1 + 1, min(H, int((1.0 - min(vs)) * H)))
+                    crop = tex_img.crop((x1, y1, x2, y2))
+
+                    poly_w = max(pt[0] for pt in p.poly2d) - min(pt[0] for pt in p.poly2d)
+                    poly_h = max(pt[1] for pt in p.poly2d) - min(pt[1] for pt in p.poly2d)
+                    crop_w, crop_h = crop.size
+                    if (poly_w > poly_h and crop_w < crop_h) or (poly_w < poly_h and crop_w > crop_h):
+                        crop = crop.rotate(90, expand=True)
+                    p.texture_crop = crop
+
         parts.append(p)
 
     # 4. Global 3D Seam Matching across all parts
@@ -458,11 +501,11 @@ def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5):
             'id': seam_id
         })
 
-        # Add matching edge label 2.5mm OUTSIDE on scrap paper margin
+        # Add matching edge label 2.0mm OUTSIDE on scrap paper margin
         cp1, cp2 = clean_edge['p1'], clean_edge['p2']
         nx, ny = compute_outward_normal(clean_part.poly2d, cp1, cp2)
-        mx = (cp1[0] + cp2[0]) * 0.5 + 2.5 * nx
-        my = (cp1[1] + cp2[1]) * 0.5 + 2.5 * ny
+        mx = (cp1[0] + cp2[0]) * 0.5 + 2.0 * nx
+        my = (cp1[1] + cp2[1]) * 0.5 + 2.0 * ny
         clean_part.edge_labels.append({
             'pos': (mx, my),
             'id': seam_id
@@ -471,64 +514,183 @@ def unfold_model_to_parts(model, target_scale=None, flap_size_mm=5.5):
     return parts
 
 
+def rotate_part_geometry(part, angle_deg, rotate_texture=True):
+    """Rotates all geometry in part by angle_deg (0, 90, 180, 270)."""
+    if angle_deg == 0:
+        return
+    rad = math.radians(angle_deg)
+    cos_a = round(math.cos(rad), 4)
+    sin_a = round(math.sin(rad), 4)
+
+    def rot(pt):
+        return (pt[0] * cos_a - pt[1] * sin_a, pt[0] * sin_a + pt[1] * cos_a)
+
+    part.poly2d = [rot(pt) for pt in part.poly2d]
+    for t in part.tabs:
+        t['edge'] = (rot(t['edge'][0]), rot(t['edge'][1]))
+        t['poly'] = [rot(pt) for pt in t['poly']]
+    for l in part.edge_labels:
+        l['pos'] = rot(l['pos'])
+    part.internal_folds = [((rot(f[0][0]), rot(f[0][1])), f[1]) for f in part.internal_folds]
+    if rotate_texture and getattr(part, 'texture_crop', None) is not None:
+        part.texture_crop = part.texture_crop.rotate(-angle_deg, expand=True)
+
+
+def get_part_outer_cut_polygon(part):
+    """
+    Constructs the exact combined outer cut perimeter:
+    - Along clean edges without tabs: p1 -> p2
+    - Along edges with attached tabs: p1 -> t1 -> t2 -> p2
+    Ensures tabs remain attached and the shared base edge is strictly a fold line.
+    """
+    poly = part.poly2d
+    n = len(poly)
+    outer_pts = []
+
+    for i in range(n):
+        p1 = poly[i]
+        p2 = poly[(i + 1) % n]
+
+        # Check if a tab is attached to this edge
+        tab_found = None
+        for t in part.tabs:
+            te1, te2 = t['edge']
+            d1 = math.hypot(te1[0] - p1[0], te1[1] - p1[1]) + math.hypot(te2[0] - p2[0], te2[1] - p2[1])
+            d2 = math.hypot(te1[0] - p2[0], te1[1] - p2[1]) + math.hypot(te2[0] - p1[0], te2[1] - p1[1])
+            if d1 < 1e-2 or d2 < 1e-2:
+                tab_found = t
+                break
+
+        if tab_found is not None:
+            t_poly = tab_found['poly']
+            if math.hypot(t_poly[0][0] - p1[0], t_poly[0][1] - p1[1]) < 1e-2:
+                outer_pts.extend([p1, t_poly[1], t_poly[2]])
+            else:
+                outer_pts.extend([p1, t_poly[2], t_poly[1]])
+        else:
+            outer_pts.append(p1)
+
+    return outer_pts
+
+
 # =============================================================================
-# 4. BIN PACKING ONTO PAGES (US LETTER / A4)
+# 4. OPTIMAL BIN PACKING ONTO PAGES (US LETTER / A4) WITH ROTATION
 # =============================================================================
 
 def pack_parts_onto_pages(parts, page_w, page_h, margin=15.0, part_gap=5.0):
     """
-    Packs 2D papercraft parts onto sheets enforcing:
-      - >= 15.0 mm clearance from all 4 page edges
-      - >= 5.0 mm clearance between adjacent parts
-      - Multi-page pagination when parts exceed one sheet
+    Optimal 2D Bin Packing to minimize sheet count:
+      - Tests 4 orthogonal rotations (0°, 90°, 180°, 270°) to find tightest fit.
+      - Enforces strict >= 15.0 mm margin from all 4 page edges.
+      - Enforces strict >= 5.0 mm clearance between all adjacent parts (including flaps/labels).
+      - Reuses existing sheets first before allocating a new sheet.
+      - Never scales or resizes any part.
     """
-    usable_w = page_w - 2.0 * margin
-    usable_h = page_h - 2.0 * margin - 15.0  # leave room for header legend
+    min_x_limit = margin
+    min_y_limit = margin
+    max_x_limit = page_w - margin
+    max_y_limit = page_h - margin
 
-    pages = []
-    current_page = []
+    # Sort parts by largest dimension descending (Best-Fit Decreasing)
+    sorted_parts = sorted(
+        parts,
+        key=lambda p: max(p.compute_bounds()[2] - p.compute_bounds()[0],
+                          p.compute_bounds()[3] - p.compute_bounds()[1]),
+        reverse=True
+    )
 
-    # Calculate part bounding boxes
-    part_boxes = []
-    for p in parts:
-        min_x, min_y, max_x, max_y = p.compute_bounds()
-        pw = max_x - min_x
-        ph = max_y - min_y
-        part_boxes.append((p, pw, ph, min_x, min_y))
+    sheets = []  # list of lists of (part, [min_x, min_y, max_x, max_y])
 
-    # Sort parts by height descending
-    part_boxes.sort(key=lambda b: b[2], reverse=True)
+    for part in sorted_parts:
+        best_sheet_idx = None
+        best_pos = None
+        best_rot = None
+        best_score = float('inf')
 
-    cur_x = margin
-    cur_y = margin + 14.0  # offset below header legend
-    shelf_h = 0.0
+        # Test each rotation: 0°, 90°, 180°, 270°
+        for rot in [0, 90, 180, 270]:
+            rotate_part_geometry(part, rot, rotate_texture=False)
+            bx1, by1, bx2, by2 = part.compute_bounds()
+            pw = bx2 - bx1
+            ph = by2 - by1
 
-    for part, pw, ph, min_x, min_y in part_boxes:
-        if cur_x + pw > margin + usable_w and len(current_page) > 0:
-            cur_x = margin
-            cur_y += shelf_h + part_gap
-            shelf_h = 0.0
+            # Check if fits within page margins
+            if pw > (max_x_limit - min_x_limit) or ph > (max_y_limit - min_y_limit):
+                rotate_part_geometry(part, -rot, rotate_texture=False)
+                continue
 
-        if cur_y + ph > margin + usable_h + 14.0 and len(current_page) > 0:
-            pages.append(current_page)
-            current_page = []
-            cur_x = margin
-            cur_y = margin + 14.0
-            shelf_h = 0.0
+            # Check all existing open sheets
+            for s_idx, sheet in enumerate(sheets):
+                # Generate candidate anchor positions on this sheet
+                candidates = [(min_x_limit, min_y_limit)]
+                for _, pb in sheet:
+                    # To the right of placed part
+                    candidates.append((pb[2] + part_gap, pb[1]))
+                    candidates.append((pb[2] + part_gap, min_y_limit))
+                    # Above placed part
+                    candidates.append((pb[0], pb[3] + part_gap))
+                    candidates.append((min_x_limit, pb[3] + part_gap))
 
-        dx = cur_x - min_x
-        dy = cur_y - min_y
-        part.translate(dx, dy)
-        current_page.append(part)
+                for cx, cy in candidates:
+                    target_x2 = cx + pw
+                    target_y2 = cy + ph
 
-        cur_x += pw + part_gap
-        if ph > shelf_h:
-            shelf_h = ph
+                    if target_x2 > max_x_limit or target_y2 > max_y_limit:
+                        continue
 
-    if current_page:
-        pages.append(current_page)
+                    # Check strict >= 5.0 mm collision clearance with all placed parts
+                    collides = False
+                    for _, pb in sheet:
+                        if not (target_x2 + part_gap <= pb[0] or
+                                cx >= pb[2] + part_gap or
+                                target_y2 + part_gap <= pb[1] or
+                                cy >= pb[3] + part_gap):
+                            collides = True
+                            break
 
-    return pages
+                    if not collides:
+                        # Score: lower sheet index first (pack existing), then lowest y2 and x2
+                        score = s_idx * 1000000 + target_y2 * 1000 + target_x2
+                        if score < best_score:
+                            best_score = score
+                            best_sheet_idx = s_idx
+                            best_pos = (cx, cy)
+                            best_rot = rot
+
+            rotate_part_geometry(part, -rot, rotate_texture=False)
+
+        if best_sheet_idx is not None:
+            # Place on best existing sheet
+            rotate_part_geometry(part, best_rot, rotate_texture=True)
+            bx1, by1, bx2, by2 = part.compute_bounds()
+            dx = best_pos[0] - bx1
+            dy = best_pos[1] - by1
+            part.translate(dx, dy)
+            final_box = part.compute_bounds()
+            sheets[best_sheet_idx].append((part, final_box))
+        else:
+            # Open a new sheet
+            best_rot = 0
+            for rot in [0, 90, 180, 270]:
+                rotate_part_geometry(part, rot, rotate_texture=False)
+                bx1, by1, bx2, by2 = part.compute_bounds()
+                pw = bx2 - bx1
+                ph = by2 - by1
+                if pw <= (max_x_limit - min_x_limit) and ph <= (max_y_limit - min_y_limit):
+                    best_rot = rot
+                    rotate_part_geometry(part, -rot, rotate_texture=False)
+                    break
+                rotate_part_geometry(part, -rot, rotate_texture=False)
+
+            rotate_part_geometry(part, best_rot, rotate_texture=True)
+            bx1, by1, bx2, by2 = part.compute_bounds()
+            dx = min_x_limit - bx1
+            dy = min_y_limit - by1
+            part.translate(dx, dy)
+            final_box = part.compute_bounds()
+            sheets.append([(part, final_box)])
+
+    return [[item[0] for item in sheet] for sheet in sheets]
 
 
 # =============================================================================
@@ -555,25 +717,25 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
     # Optical registration marks (5x5mm black squares for optical plotter sensors)
     svg.append('  <!-- OPTICAL REGISTRATION MARKS -->')
     svg.append('  <g id="REGISTRATION_MARKS" fill="#000000">')
-    svg.append(f'    <rect x="{15.0}" y="{6.0}" width="5" height="5"/>')
-    svg.append(f'    <rect x="{page_w - 20.0}" y="{6.0}" width="5" height="5"/>')
+    svg.append(f'    <rect x="{15.0}" y="{3.0}" width="5" height="5"/>')
+    svg.append(f'    <rect x="{page_w - 20.0}" y="{3.0}" width="5" height="5"/>')
     svg.append('  </g>')
 
     # Header & Legend
     svg.append('  <!-- HEADER & LEGEND SWATCHES -->')
-    svg.append(f'  <text x="24" y="9.5" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="3.5" fill="#111111">'
+    svg.append(f'  <text x="24" y="6.8" font-family="Helvetica, Arial, sans-serif" font-weight="bold" font-size="3.2" fill="#111111">'
                f'3D Papercraft Template (Pepakura Alternative) — Page {page_num}/{total_pages}</text>')
 
     if variation in (1, 3):
-        svg.append('  <g id="LEGEND" transform="translate(24, 14.5)" font-family="Helvetica, Arial, sans-serif" font-size="2.2" fill="#333333">')
-        svg.append('    <line x1="0" y1="0" x2="10" y2="0" stroke="#000000" stroke-width="0.4"/>')
-        svg.append('    <text x="12" y="0.8">Solid: Cut Line</text>')
-        svg.append('    <line x1="42" y1="0" x2="52" y2="0" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>')
-        svg.append('    <text x="54" y="0.8">Dashed Red: Mountain Fold (_ _ _)</text>')
-        svg.append('    <line x1="102" y1="0" x2="114" y2="0" stroke="#1976D2" stroke-width="0.4" stroke-dasharray="2.0,0.7,0.5,0.7"/>')
-        svg.append('    <text x="116" y="0.8">Dash-Dot Blue: Valley Fold (_ . _ .)</text>')
-        svg.append('    <rect x="166" y="-2" width="7" height="4" fill="url(#flap_crosshatch)" stroke="#777777" stroke-width="0.25"/>')
-        svg.append('    <text x="175" y="0.8">Flap (Cross-lined)</text>')
+        svg.append('  <g id="LEGEND" transform="translate(24, 11.2)" font-family="Helvetica, Arial, sans-serif" font-size="2.0" fill="#333333">')
+        svg.append('    <line x1="0" y1="0" x2="8" y2="0" stroke="#000000" stroke-width="0.4"/>')
+        svg.append('    <text x="10" y="0.7">Solid: Cut Line</text>')
+        svg.append('    <line x1="32" y1="0" x2="40" y2="0" stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>')
+        svg.append('    <text x="42" y="0.7">Dashed Red: Mountain Fold (_ _ _)</text>')
+        svg.append('    <line x1="88" y1="0" x2="96" y2="0" stroke="#1976D2" stroke-width="0.4" stroke-dasharray="2.0,0.7,0.5,0.7"/>')
+        svg.append('    <text x="98" y="0.7">Dash-Dot Blue: Valley Fold (_ . _ .)</text>')
+        svg.append('    <rect x="142" y="-1.8" width="6" height="3.5" fill="url(#flap_crosshatch)" stroke="#777777" stroke-width="0.25"/>')
+        svg.append('    <text x="150" y="0.7">Flap (Cross-lined)</text>')
         svg.append('  </g>')
 
     # Layer: Facet Backgrounds
@@ -587,7 +749,7 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
 
     # Layer: Glue Flaps (cross-hatched with faint grey fill)
     svg.append('  <!-- GLUE TABS (OUTWARD 45° WITH CROSS-HATCH PATTERN) -->')
-    svg.append('  <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="#000000" stroke-width="0.35">')
+    svg.append('  <g id="GLUE_TABS" fill="url(#flap_crosshatch)" stroke="none">')
     for part in page_parts:
         for t in part.tabs:
             pts_str = " ".join(f"{p[0]:.2f},{p[1]:.2f}" for p in t['poly'])
@@ -599,7 +761,7 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
         svg.append('  <!-- INTERNAL CREASE LINES -->')
         svg.append('  <g id="FOLD_LINES">')
         for part in page_parts:
-            # Baseline of tabs is mountain fold
+            # Baseline of tabs is strictly a dashed mountain fold
             for t in part.tabs:
                 p1, p2 = t['edge']
                 svg.append(f'    <line x1="{p1[0]:.2f}" y1="{p1[1]:.2f}" x2="{p2[0]:.2f}" y2="{p2[1]:.2f}" '
@@ -613,11 +775,12 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
                                f'stroke="#D32F2F" stroke-width="0.4" stroke-dasharray="1.5,0.7"/>')
         svg.append('  </g>')
 
-    # Layer: Cut Lines (Solid Black 0.4mm)
+    # Layer: Cut Lines (Solid Black 0.4mm around combined outer contour of part + flaps)
     svg.append('  <!-- CUT OUTLINES -->')
     svg.append('  <g id="CUT_LINES" fill="none" stroke="#000000" stroke-width="0.4">')
     for part in page_parts:
-        pts_str = " ".join(f"{p[0]:.2f},{p[1]:.2f}" for p in part.poly2d)
+        outer_pts = get_part_outer_cut_polygon(part)
+        pts_str = " ".join(f"{p[0]:.2f},{p[1]:.2f}" for p in outer_pts)
         svg.append(f'    <polygon points="{pts_str}"/>')
     svg.append('  </g>')
 
@@ -654,62 +817,79 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
 
         # Optical registration marks (5x5 mm black squares)
         c.setFillColor(colors.black)
-        c.rect(15.0 * MM_TO_PT, (page_h - 11.0) * MM_TO_PT, 5.0 * MM_TO_PT, 5.0 * MM_TO_PT, fill=1, stroke=0)
-        c.rect((page_w - 20.0) * MM_TO_PT, (page_h - 11.0) * MM_TO_PT, 5.0 * MM_TO_PT, 5.0 * MM_TO_PT, fill=1, stroke=0)
+        c.rect(15.0 * MM_TO_PT, (page_h - 8.0) * MM_TO_PT, 5.0 * MM_TO_PT, 5.0 * MM_TO_PT, fill=1, stroke=0)
+        c.rect((page_w - 20.0) * MM_TO_PT, (page_h - 8.0) * MM_TO_PT, 5.0 * MM_TO_PT, 5.0 * MM_TO_PT, fill=1, stroke=0)
 
         # Header Title
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(24.0 * MM_TO_PT, (page_h - 9.5) * MM_TO_PT,
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(24.0 * MM_TO_PT, (page_h - 6.8) * MM_TO_PT,
                      f"3D Papercraft Template (Pepakura Alternative) — Page {page_num}/{total_pages}")
 
         # Legend (Variations 1 and 3)
         if variation in (1, 3):
-            leg_y = (page_h - 14.5) * MM_TO_PT
-            c.setFont("Helvetica", 6.5)
+            leg_y = (page_h - 11.2) * MM_TO_PT
+            c.setFont("Helvetica", 6.0)
 
             # Solid Cut Line
             c.setStrokeColor(colors.black)
             c.setLineWidth(1.1)
             c.setDash([])
-            c.line(24 * MM_TO_PT, leg_y, 34 * MM_TO_PT, leg_y)
-            c.drawString(36 * MM_TO_PT, leg_y - 2, "Solid: Cut Line")
+            c.line(24 * MM_TO_PT, leg_y, 32 * MM_TO_PT, leg_y)
+            c.drawString(34 * MM_TO_PT, leg_y - 2, "Solid: Cut Line")
 
             # Dashed Red Mountain Fold
             c.setStrokeColor(colors.HexColor('#D32F2F'))
             c.setLineWidth(1.1)
             c.setDash([4.5, 2.0])
-            c.line(66 * MM_TO_PT, leg_y, 76 * MM_TO_PT, leg_y)
-            c.drawString(78 * MM_TO_PT, leg_y - 2, "Dashed Red: Mountain Fold (_ _ _)")
+            c.line(56 * MM_TO_PT, leg_y, 64 * MM_TO_PT, leg_y)
+            c.drawString(66 * MM_TO_PT, leg_y - 2, "Dashed Red: Mountain Fold (_ _ _)")
 
             # Dash-Dot Blue Valley Fold
             c.setStrokeColor(colors.HexColor('#1976D2'))
             c.setLineWidth(1.1)
             c.setDash([6.0, 2.0, 1.5, 2.0])
-            c.line(126 * MM_TO_PT, leg_y, 138 * MM_TO_PT, leg_y)
-            c.drawString(140 * MM_TO_PT, leg_y - 2, "Dash-Dot Blue: Valley Fold (_ . _ .)")
+            c.line(112 * MM_TO_PT, leg_y, 120 * MM_TO_PT, leg_y)
+            c.drawString(122 * MM_TO_PT, leg_y - 2, "Dash-Dot Blue: Valley Fold (_ . _ .)")
 
             # Flap swatch
             c.setDash([])
             c.setStrokeColor(colors.HexColor('#777777'))
             c.setLineWidth(0.7)
             c.setFillColor(colors.HexColor('#E6E6E6'))
-            c.rect(190 * MM_TO_PT, leg_y - 3, 7 * MM_TO_PT, 4 * MM_TO_PT, fill=1, stroke=1)
+            c.rect(166 * MM_TO_PT, leg_y - 2.5, 6 * MM_TO_PT, 3.5 * MM_TO_PT, fill=1, stroke=1)
             c.setFillColor(colors.HexColor('#333333'))
-            c.drawString(199 * MM_TO_PT, leg_y - 2, "Flap (Cross-lined)")
+            c.drawString(174 * MM_TO_PT, leg_y - 2, "Flap (Cross-lined)")
 
         # Render Parts
         for part in page_parts:
-            # 1. Facet fill
-            fill_c = colors.white if variation in (3, 4) else colors.HexColor('#FAFAFA')
-            c.setFillColor(fill_c)
-            p = c.beginPath()
-            p.moveTo(part.poly2d[0][0] * MM_TO_PT, (page_h - part.poly2d[0][1]) * MM_TO_PT)
-            for pt in part.poly2d[1:]:
-                p.lineTo(pt[0] * MM_TO_PT, (page_h - pt[1]) * MM_TO_PT)
-            p.close()
-            c.drawPath(p, fill=1, stroke=0)
+            # 1. Facet fill / Texture Artwork
+            if variation in (1, 2) and getattr(part, 'texture_crop', None) is not None:
+                c.saveState()
+                clip_p = c.beginPath()
+                clip_p.moveTo(part.poly2d[0][0] * MM_TO_PT, (page_h - part.poly2d[0][1]) * MM_TO_PT)
+                for pt in part.poly2d[1:]:
+                    clip_p.lineTo(pt[0] * MM_TO_PT, (page_h - pt[1]) * MM_TO_PT)
+                clip_p.close()
+                c.clipPath(clip_p, stroke=0)
 
-            # 2. Glue Tabs (faint grey with cross-hatch pattern)
+                min_x, min_y, max_x, max_y = part.compute_poly_bounds()
+                img_x = min_x * MM_TO_PT
+                img_y = (page_h - max_y) * MM_TO_PT
+                img_w = (max_x - min_x) * MM_TO_PT
+                img_h = (max_y - min_y) * MM_TO_PT
+                c.drawInlineImage(part.texture_crop, img_x, img_y, img_w, img_h)
+                c.restoreState()
+            else:
+                fill_c = colors.white if variation in (3, 4) else colors.HexColor('#FAFAFA')
+                c.setFillColor(fill_c)
+                p = c.beginPath()
+                p.moveTo(part.poly2d[0][0] * MM_TO_PT, (page_h - part.poly2d[0][1]) * MM_TO_PT)
+                for pt in part.poly2d[1:]:
+                    p.lineTo(pt[0] * MM_TO_PT, (page_h - pt[1]) * MM_TO_PT)
+                p.close()
+                c.drawPath(p, fill=1, stroke=0)
+
+            # 2. Glue Tabs (faint grey with cross-hatch pattern, fill only without outline)
             for t in part.tabs:
                 c.saveState()
                 c.setFillColor(colors.HexColor('#E6E6E6'))
@@ -722,7 +902,7 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
                 for pt in t['poly'][1:]:
                     tp.lineTo(pt[0] * MM_TO_PT, (page_h - pt[1]) * MM_TO_PT)
                 tp.close()
-                c.drawPath(tp, fill=1, stroke=1)
+                c.drawPath(tp, fill=1, stroke=0)
 
                 # Clip path for cross-hatch pattern inside flap
                 c.clipPath(tp, stroke=0)
@@ -742,10 +922,10 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
 
             # 3. Internal Fold Creases (Variations 1 and 3)
             if variation in (1, 3):
-                # Tab base creases
+                # Tab base creases - strictly dashed red mountain fold
                 c.setStrokeColor(colors.HexColor('#D32F2F'))
-                c.setLineWidth(1.0)
-                c.setDash([4.5, 2.0])
+                c.setLineWidth(1.2)
+                c.setDash([5.0, 2.5])
                 for t in part.tabs:
                     p1, p2 = t['edge']
                     c.line(p1[0] * MM_TO_PT, (page_h - p1[1]) * MM_TO_PT,
@@ -755,22 +935,23 @@ def export_pdf_pages(pages, page_w, page_h, filepath, variation=1):
                 for (p1, p2), ftype in part.internal_folds:
                     if ftype == 'valley':
                         c.setStrokeColor(colors.HexColor('#1976D2'))
-                        c.setLineWidth(1.0)
+                        c.setLineWidth(1.2)
                         c.setDash([6.0, 2.0, 1.5, 2.0])
                     else:
                         c.setStrokeColor(colors.HexColor('#D32F2F'))
-                        c.setLineWidth(1.0)
-                        c.setDash([4.5, 2.0])
+                        c.setLineWidth(1.2)
+                        c.setDash([5.0, 2.5])
                     c.line(p1[0] * MM_TO_PT, (page_h - p1[1]) * MM_TO_PT,
                            p2[0] * MM_TO_PT, (page_h - p2[1]) * MM_TO_PT)
 
-            # 4. Cut Outline (Solid Black)
+            # 4. Cut Outline (Solid Black around get_part_outer_cut_polygon)
             c.setStrokeColor(colors.black)
             c.setLineWidth(1.1)
             c.setDash([])
             out_p = c.beginPath()
-            out_p.moveTo(part.poly2d[0][0] * MM_TO_PT, (page_h - part.poly2d[0][1]) * MM_TO_PT)
-            for pt in part.poly2d[1:]:
+            outer_pts = get_part_outer_cut_polygon(part)
+            out_p.moveTo(outer_pts[0][0] * MM_TO_PT, (page_h - outer_pts[0][1]) * MM_TO_PT)
+            for pt in outer_pts[1:]:
                 out_p.lineTo(pt[0] * MM_TO_PT, (page_h - pt[1]) * MM_TO_PT)
             out_p.close()
             c.drawPath(out_p, fill=0, stroke=1)
@@ -847,7 +1028,7 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
 
     # 3. Unfold to 2D Planar Parts with specified flap size
     print(f"Unfolding 3D mesh into 2D planar papercraft parts (Flap size: {flap_size_mm:.1f} mm, Scale: {scale:.1f}x)...")
-    parts = unfold_model_to_parts(model, target_scale=scale, flap_size_mm=flap_size_mm)
+    parts = unfold_model_to_parts(model, target_scale=scale, flap_size_mm=flap_size_mm, texture_path=texture_path)
     print(f"Unfolded into {len(parts)} papercraft parts.")
 
     # 4. Bin Pack onto Pages
