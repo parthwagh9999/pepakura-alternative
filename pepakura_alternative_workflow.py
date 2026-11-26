@@ -1449,16 +1449,24 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
     """Generates precision vector SVG for cutting plotters and manual craft."""
     svg = []
     svg.append('<?xml version="1.0" encoding="UTF-8"?>')
-    svg.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{page_w}mm" height="{page_h}mm" '
-               f'viewBox="0 0 {page_w} {page_h}">')
+    svg.append(f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+               f'width="{page_w}mm" height="{page_h}mm" viewBox="0 0 {page_w} {page_h}">')
 
-    # Defs: Cross-hatch diamond pattern for glue tabs
+    # Defs: Cross-hatch diamond pattern for glue tabs & clipPaths for textured parts
     svg.append('  <defs>')
     svg.append('    <pattern id="flap_crosshatch" width="2.2" height="2.2" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">')
     svg.append('      <rect width="2.2" height="2.2" fill="#E6E6E6"/>')
     svg.append('      <line x1="0" y1="0" x2="0" y2="2.2" stroke="#B8B8B8" stroke-width="0.32"/>')
     svg.append('      <line x1="0" y1="0" x2="2.2" y2="0" stroke="#B8B8B8" stroke-width="0.32"/>')
     svg.append('    </pattern>')
+
+    if variation in (1, 2):
+        for p_idx, part in enumerate(page_parts):
+            if getattr(part, 'texture_crop', None) is not None:
+                pts_str = " ".join(f"{p[0]:.2f},{p[1]:.2f}" for p in part.poly2d)
+                svg.append(f'    <clipPath id="clip_part_{page_num}_{p_idx}">')
+                svg.append(f'      <polygon points="{pts_str}"/>')
+                svg.append('    </clipPath>')
     svg.append('  </defs>')
 
     # Optical registration marks (5x5mm black squares for optical plotter sensors)
@@ -1485,13 +1493,27 @@ def export_svg_page(page_parts, page_num, total_pages, page_w, page_h, filepath,
         svg.append('    <text x="150" y="0.7">Flap (Cross-lined)</text>')
         svg.append('  </g>')
 
-    # Layer: Facet Backgrounds
+    # Layer: Facet Backgrounds & Textures
     fill_color = "#FFFFFF" if variation in (3, 4) else "#FBF9F5"
-    svg.append('  <!-- PART FACETS -->')
-    svg.append(f'  <g id="FACETS" fill="{fill_color}" stroke="none">')
-    for part in page_parts:
+    svg.append('  <!-- PART FACETS & TEXTURES -->')
+    svg.append('  <g id="FACETS">')
+    for p_idx, part in enumerate(page_parts):
         pts_str = " ".join(f"{p[0]:.2f},{p[1]:.2f}" for p in part.poly2d)
-        svg.append(f'    <polygon points="{pts_str}"/>')
+        if variation in (1, 2) and getattr(part, 'texture_crop', None) is not None:
+            # Fallback polygon under image
+            svg.append(f'    <polygon points="{pts_str}" fill="{fill_color}" stroke="none"/>')
+            buf = BytesIO()
+            part.texture_crop.save(buf, format="PNG")
+            b64_str = base64.b64encode(buf.getvalue()).decode('ascii')
+            min_x, min_y, max_x, max_y = part.compute_poly_bounds()
+            img_w = max_x - min_x
+            img_h = max_y - min_y
+            svg.append(f'    <image href="data:image/png;base64,{b64_str}" '
+                       f'xlink:href="data:image/png;base64,{b64_str}" '
+                       f'x="{min_x:.2f}" y="{min_y:.2f}" width="{img_w:.2f}" height="{img_h:.2f}" '
+                       f'clip-path="url(#clip_part_{page_num}_{p_idx})" preserveAspectRatio="none"/>')
+        else:
+            svg.append(f'    <polygon points="{pts_str}" fill="{fill_color}" stroke="none"/>')
     svg.append('  </g>')
 
     # Layer: Glue Flaps (cross-hatched with faint grey fill)
@@ -1768,7 +1790,7 @@ def render_pdf_to_300dpi_pngs(pdf_path, output_dir, prefix):
 
 def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
                  paper_format="LETTER", flap_size_mm=5.5, user_scale=None,
-                 join_faces=False, footer_text="The Fine Exchange"):
+                 join_faces=False, footer_text="The Fine Exchange", svg_only=False):
     """Executes the complete universal 3D papercraft pipeline."""
     if paper_format.upper() == "A4":
         page_w = 210.0
@@ -1822,10 +1844,11 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
         os.makedirs(var_dir, exist_ok=True)
         print(f"\n[Variation {var_id}] {var_title}")
 
-        # PDF Export
-        pdf_path = os.path.join(var_dir, f"papercraft_template_{var_dir_name}.pdf")
-        export_pdf_pages(pages, page_w, page_h, pdf_path, variation=var_id, footer_text=footer_text)
-        print(f"  -> Generated Vector PDF: {pdf_path}")
+        if not svg_only:
+            # PDF Export
+            pdf_path = os.path.join(var_dir, f"papercraft_template_{var_dir_name}.pdf")
+            export_pdf_pages(pages, page_w, page_h, pdf_path, variation=var_id, footer_text=footer_text)
+            print(f"  -> Generated Vector PDF: {pdf_path}")
 
         # SVG Export
         for p_idx, page_parts in enumerate(pages):
@@ -1834,8 +1857,9 @@ def run_pipeline(input_model_path=None, texture_path=None, outdir="exports",
                             variation=var_id, footer_text=footer_text)
             print(f"  -> Generated Vector SVG (Page {p_idx + 1}): {svg_path}")
 
-        # 300 DPI PNG Export
-        render_pdf_to_300dpi_pngs(pdf_path, var_dir, f"template_{var_dir_name}")
+        if not svg_only:
+            # 300 DPI PNG Export
+            render_pdf_to_300dpi_pngs(pdf_path, var_dir, f"template_{var_dir_name}")
 
     print("\n[SUCCESS] Universal 3D Papercraft Pipeline completed across all 4 variations!")
 
@@ -1860,6 +1884,8 @@ if __name__ == "__main__":
                         help="Intelligently join faces across shared edges into connected non-overlapping islands")
     parser.add_argument("--footer", type=str, default="The Fine Exchange",
                         help="Optional centered bold 14pt footer text inside the bottom 15mm margin")
+    parser.add_argument("--svg-only", action="store_true",
+                        help="Only regenerate and replace SVG files without touching PDF or PNG deliverables")
 
     args = parser.parse_args()
     run_pipeline(
