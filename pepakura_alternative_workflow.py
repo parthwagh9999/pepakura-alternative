@@ -3,27 +3,99 @@
 =============================================================================
 Pepakura Alternative: Universal 3D Papercraft & Plotter Pipeline
 =============================================================================
-A fully autonomous, precision papercraft template generator for manual crafting
-and cutting plotters (Cricut, Silhouette, Brother, etc.).
+A fully autonomous, industrial-grade papercraft template engine and cutting
+plotter pipeline designed for manual assembly, Cricut, Silhouette, and Brother.
 
-Accepts ANY 3D model (.obj) and produces production-grade vector templates:
-  - Intelligent Unit & Scale Detection: Automatically detects meters, cm, or mm
-  - Page Format: US Letter (8.5 x 11.0 in / 215.9 x 279.4 mm) or A4
-  - Margins: Strict >= 15.0 mm clearance from all page edges
-  - Part Spacing: Strict >= 5.0 mm clearance between adjacent parts
-  - Outward Glue Tabs: 45° base angle with faint grey fill (#E6E6E6), configurable
-    depth in mm, and fine diagonal cross-hatch pattern (#B8B8B8)
-  - Edge Matching IDs: Protected badges on tabs, exterior placement on cut edges
-  - Fold Classifications:
-      * Mountain Folds: Dashed Red (#D32F2F)
-      * Valley Folds: Dash-Dot Blue (#1976D2)
-      * Cut Outlines: Continuous Solid Black (#000000)
-  - Output Variations:
-      1) Full Color + Fold Lines + Edge IDs
-      2) Full Color (No Lines, clean cut outlines only)
-      3) Blank White + Fold Lines + Edge IDs
-      4) Blank White (No Lines, clean cut outlines only)
-  - Export Formats: Vector PDF, Multi-layer SVG, and 300 DPI PNG (2550x3300 px)
+=============================================================================
+MASTER ENGINEERING SPECIFICATION & RULES ENGINE (Codified from Project History)
+=============================================================================
+
+1. DIMENSIONAL SCALING & STRICT SCALE LOCK:
+   - Coordinate System: Real-world millimeters (1 mm = 72/25.4 ≈ 2.834645669 pt).
+   - Auto-detection:
+       * max_dim < 2.0  -> Model is in METERS      -> Scale by 1000.0 (mm)
+       * max_dim < 25.0 -> Model is in CENTIMETERS -> Scale by 10.0 (mm)
+       * Otherwise      -> Model is in MILLIMETERS -> Scale by 1.0 (mm)
+   - Strict Scale Invariance: Once a model's scale factor is computed or passed,
+     it is ABSOLUTELY IMMUTABLE. Unfolding, edge-joining, rotation, and bin packing
+     must NEVER rescale, stretch, or deform any polygon (scale lock guarantee).
+
+2. SHEET GEOMETRY, MARGINS & CLEARANCES:
+   - Formats: US Letter (215.9 x 279.4 mm) or ISO A4 (210.0 x 297.0 mm).
+   - Margin Guarantee: Strict margin >= 15.0 mm from all 4 sheet borders.
+     Printable area for Letter: 185.9 x 249.4 mm.
+   - Inter-Part Clearance: Strict gap >= 5.0 mm between adjacent parts (including flaps).
+   - Bin Packing: Multi-angle rotation (0°, 90°, 180°, 270°) to minimize sheet count.
+   - Collision Avoidance: Exact polygon Minkowski/bounding-box collision tests ensure
+     no part or flap overlaps any neighbor or encroaches into the 15mm border.
+
+3. GLUE TAB & FLAP ENGINEERING:
+   - Flap Depth: Exactly 5.5 mm default (configurable via --flap-size).
+   - Outward 45° Miter: Every glue tab features outward 45° beveled ends to prevent
+     overlap collision at sharp corners.
+   - Alternating Flap Assignment: For every shared 3D seam, exactly ONE facet receives
+     a glue tab while the mating facet remains clean.
+   - Diamond Cross-Hatch Grip: A 45° angled cross-hatch texture (2.2 mm pitch,
+     fill #E6E6E6, stroke #B8B8B8) is etched onto every flap. This micro-texture creates
+     micro-channels for liquid PVA / tacky glue, preventing slippage and curing instantly.
+   - Tab Base Crease: The baseline where a tab meets the facet is strictly classified
+     and rendered as a Mountain Fold (dashed red line).
+
+4. ZERO-BLEMISH SCRAP-MARGIN SEAM NUMBERING:
+   - Invisible Finished Seams: Matching seam numbers are NEVER stamped on visible faces.
+   - Scrap Margin Offsetting: Mating numbers on clean edges are projected 2.0 to 2.5 mm
+     OUTWARD along the edge normal into the scrap margin cardstock. When cut along the
+     solid cut line, all mating numbers are discarded on the scrap paper.
+   - Protected Circular Badges: Tab edge IDs are centered inside circular badges (Ø 4.4 mm,
+     fill #E6E6E6, stroke #999999) on the tab body, concealed inside the finished model.
+
+5. DIHEDRAL FOLD LINE PHYSICS & CLASSIFICATION:
+   - Computed from 3D surface unit normals and edge vectors.
+   - Flat Seam Suppression: Adjacent faces with dihedral angle between 175° and 180°
+     (coplanar) are suppressed from creasing.
+   - Mountain Fold (Crease Away): Convex edge (dihedral angle < 175°).
+     Rendered as Dashed Red Line (#D32F2F, stroke 0.4 mm / 1.1 pt, dash pattern 1.5, 0.7 mm).
+   - Valley Fold (Crease Inward): Concave edge (dihedral angle > 180°).
+     Rendered as Dash-Dot Blue Line (#1976D2, stroke 0.4 mm / 1.1 pt, dash pattern 2.0, 0.7, 0.5, 0.7 mm).
+   - Solid Cut Lines: Outer perimeter of facet + glue tabs rendered as Continuous Solid Black
+     (#000000, stroke 0.4 mm / 1.1 pt).
+
+6. FLAP-AWARE EDGE JOINING (ISLANDS VS. INDIVIDUAL FACETS):
+   - Scope: Individual facets (join_faces=False) for large architectural buildings to
+     maximize printable scale; connected islands (join_faces=True) for trees and conical shapes.
+   - Overlap Detection: Before joining face B to face A, verify that face B and all its
+     existing and prospective flaps do not intersect face A or exceed printable sheet bounds.
+   - Circular/Conical Seam Rules: When multiple facets wrap into conical or cylindrical
+     shapes, flaps that would collide or crowd are broken into separate clean seams.
+
+7. TEXTURE BAKING & VERTICAL FACADE ORIENTATION:
+   - Upright Alignment: Vertical facade faces project with roof apices pointing up towards
+     the sheet top (smaller 2D y in SVG, higher in PDF) and ground foundations towards bottom.
+   - Perspective-Correct Affine UV Mapping: Each facet or island sub-face is baked via
+     barycentric affine transformation from the 3D model's texture coordinates.
+   - Post-Packing Re-Baking: After parts are rotated during 2D bin packing, textures are
+     re-baked on the final rotated geometry so textures perfectly follow part orientation.
+
+8. THE 4 PRODUCTION VARIATIONS:
+   - Variation 1: 1_full_color_with_lines (Full color + Fold lines + Seam IDs)
+   - Variation 2: 2_full_color_no_lines   (Full color + clean cut outlines only)
+   - Variation 3: 3_blank_white_with_lines (Blank white + Fold lines + Seam IDs)
+   - Variation 4: 4_blank_white_no_lines   (Blank white + clean cut outlines only)
+
+9. MULTI-FORMAT EXPORTS:
+   - Vector PDF: Multi-page, exact millimeter PostScript coordinates, vector line art,
+     embedded 300 DPI texture images, legend, header, registration marks, and footer.
+   - Multi-Layer Vector SVG: Standard W3C SVG 1.1/2.0 with separate grouped layers,
+     embedded base64 PNG textures with <clipPath>, Cricut & Silhouette plotter ready.
+   - 300 DPI PNG: High-res print rasterization (2550 x 3300 px for Letter).
+
+10. BRANDING & FOOTER SPECIFICATION:
+    - Default footer: "The Fine Exchange" (or custom via --footer).
+    - Rendered in bold 14pt (4.94 mm) font, centered horizontally inside the bottom 15mm margin.
+
+11. SELECTIVE SVG REPLACEMENT MODE:
+    - --svg-only flag: Re-exports and replaces only SVG files while leaving all existing
+      PDF and PNG deliverables 100% untouched.
 =============================================================================
 """
 
